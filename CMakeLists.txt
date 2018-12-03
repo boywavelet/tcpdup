@@ -5,7 +5,7 @@ set (Tutorial_VERSION_MINOR 0)
 
 SET(EXECUTABLE_OUTPUT_PATH ${tcpdup_SOURCE_DIR}/bin)
 
-SET(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -rdynamic -g -O2 -Wall -std=c++11 -DBOOST_NO_CXX11_SCOPED_ENUMS")
+SET(CMAKE_C_FLAGS "${CMAKE_CXX_FLAGS} -rdynamic -g -O2 -Wall -Werror")
 
 INCLUDE_DIRECTORIES("include")
 
