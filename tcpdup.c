@@ -1,7 +1,5 @@
 #include <netinet/ip.h>
-
 #include <netinet/tcp.h>
-
 #include <pcap.h>
 
 #include <string.h>
@@ -11,6 +9,13 @@
 #define MAXBYTES2CAPTURE 2048
 
 int main(int argc, char* argv[]) {
+
+	if (argc != 2) {
+		printf("tcpdup <network-interface>");
+		exit(1);
+	}
+	char filter_input[256] = "tcp and dst 10.23.53.150 and port 9097";
+
 	int count = 0;
 	bpf_u_int32 netaddr = 0, mask = 0;
 
@@ -25,17 +30,9 @@ int main(int argc, char* argv[]) {
 	char errbuf[PCAP_ERRBUF_SIZE];
 	memset(errbuf, 0, PCAP_ERRBUF_SIZE);
 	
-	if (argc != 2) {
-		printf("a.out <interface>");
-		exit(1);
-	}
-
 	descr = pcap_open_live(argv[1], MAXBYTES2CAPTURE, 1, 512, errbuf);
-
 	pcap_lookupnet(argv[1], &netaddr, &mask, errbuf);
-
-	pcap_compile(descr, &filter, "tcp and dst 10.23.53.150 and port 9097", 1, mask);
-
+	pcap_compile(descr, &filter, filter_input, 1, mask);
 	pcap_setfilter(descr, &filter);
 
 	int linktype = pcap_datalink(descr);
