@@ -5,14 +5,13 @@
 #include <stdlib.h>
 #include <ctype.h>
 #include <unistd.h>
+#include <signal.h>
 #include <arpa/inet.h>
 #include <sys/socket.h>
 #include <sys/types.h>
 
+#include "tcp_util.h"
 #include "ringbuffer.h"
-
-#define MAXBYTES2CAPTURE 2048
-#define SIZE_ETHERHDR 14
 
 void print_app_data(const unsigned char* packet, int start, int end) 
 {
@@ -56,9 +55,23 @@ int init_client_socket(char* ip, u_int16_t port)
 	return sock;
 }
 
+int init_client_socket_withretry(char* ip, u_int16_t port) 
+{
+	while (1) {
+		int sock = init_client_socket(ip, port);
+		if (sock > 0) {
+			return sock;
+		} else {
+			sleep(10);
+		}
+	}
+}
+
 void free_client_socket(int sock)
 {
-	close(sock);
+	if (0 != close(sock)) {
+		perror("CLOSE SOCKET FAIL:");
+	}
 }
 
 int write_client_data(
@@ -72,12 +85,32 @@ int write_client_data(
 	iov[1].iov_base = packet;
 	iov[1].iov_len = packet_len;
 	if (writev(sock, iov, 2) < 0) {
-		perror("write data failed \n");
+		perror("write data failed");
 		return -1;
 	}
 	return 0;
 }
 
+int write_client_data_withretry(
+		int* sock, 
+		struct pcap_pkthdr *pkthdr, 
+		unsigned char* packet, int packet_len, 
+		char* ip, u_int16_t port) 
+{
+	while (1) {
+		if (0 == write_client_data(*sock, pkthdr, packet, packet_len)) {
+			printf("Write data success:%ld\n", packet_len + sizeof(struct pcap_pkthdr));
+			return 0;
+		} else {
+			printf("Write data failed, Retrying...\n");
+			free_client_socket(*sock);
+			*sock = init_client_socket_withretry(ip, port);
+		}
+	}
+	return -1;
+}
+
+//TODO MAYBE:when start, need to send signal data to clear all buffer
 void* retransfer(void *arg) 
 {
 	mock_request_t* fr = (mock_request_t*)arg;
@@ -105,7 +138,7 @@ void* retransfer(void *arg)
 		int size_iphdr = sizeof(struct ip);
 		int size_tcphdr = tcphdr->doff * 4;
 		int payload_len = size_ip - size_iphdr - size_tcphdr;
-		if (debug) {
+		if (debug == 2) {
 			printf ("Received Size: %d\n", pkthdr.len);
 			printf ("SRC IP: %s:\n", inet_ntoa(iphdr->ip_src));
 			printf ("SRC PORT: %d:\n", ntohs(tcphdr->th_sport));
@@ -118,15 +151,12 @@ void* retransfer(void *arg)
 			print_app_data(packet, SIZE_ETHERHDR + size_iphdr + size_tcphdr, pkthdr.len);
 		}
 		
-		if (0 != write_client_data(sock, &pkthdr, packet, packet_len)) {
-			//TODO need to process server-socket close, in case close_wait
-			printf("write data failed \n");
-			free_client_socket(sock);
-			sock = init_client_socket(ip, data_server_port);
-			if (sock < 0) {
-				printf("init client_socket failed \n");
-				exit(1);
-			}
+		//retry as many times as we can
+		if (0 != write_client_data_withretry(&sock, 
+					&pkthdr, packet, packet_len, 
+					ip, data_server_port)) {
+			printf("Write data failed \n");
+			sleep(10);
 		}
 	}
 
@@ -140,6 +170,8 @@ int main(int argc, char* argv[])
 		printf("tcpdup <network-interface>\n");
 		exit(1);
 	}
+	signal(SIGPIPE, SIG_IGN);
+
 	//TODO init all fields
 	char filter_input[256] = "tcp and ((dst 10.23.53.150 and dst port 12345) or (src 10.23.53.150 and src port 12345))";
 	int data_buffer_size = 100 * 1024 * 1024;
@@ -195,10 +227,12 @@ int main(int argc, char* argv[])
 
 		++count;
 		printf ("CURRENT READ: %d, WRITE:%d, AVAIL:%d\n", 
-				buffer->read_pos, buffer->write_pos, get_ringbuffer_avail_size(buffer));
+				buffer->read_pos, buffer->write_pos, 
+				get_ringbuffer_avail_write_size(buffer));
 	}
 
 	pthread_join(retransfer_thread, NULL);
 	destroy_ringbuffer(&buffer);
 	return 0;
 }
+

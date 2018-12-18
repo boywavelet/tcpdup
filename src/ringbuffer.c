@@ -32,7 +32,7 @@ int can_read_ringbuffer(ring_buffer_t *prb)
 	return prb->write_pos != prb->read_pos;
 }
 
-int get_ringbuffer_avail_size(ring_buffer_t *prb) 
+int get_ringbuffer_avail_write_size(ring_buffer_t *prb) 
 {
 	int write_pos = prb->write_pos;
 	int read_pos = prb->read_pos;
@@ -45,9 +45,14 @@ int get_ringbuffer_avail_size(ring_buffer_t *prb)
 	}
 }
 
+int get_ringbuffer_avail_read_size(ring_buffer_t *prb) 
+{
+	return prb->size - get_ringbuffer_avail_write_size(prb);
+}
+
 int ringbuffer_write(ring_buffer_t* prb, const void* data, int len) 
 {
-	if (len > get_ringbuffer_avail_size(prb)) {
+	if (len > get_ringbuffer_avail_write_size(prb)) {
 		return -1;
 	}
 	int write_pos = prb->write_pos;
@@ -68,7 +73,7 @@ int ringbuffer_write2(
         const void* head, int head_len, 
         const void* data, int data_len) 
 {
-	if (head_len + data_len > get_ringbuffer_avail_size(prb)) {
+	if (head_len + data_len > get_ringbuffer_avail_write_size(prb)) {
 		return -1;
 	}
 	ringbuffer_write(prb, head, head_len);
@@ -104,6 +109,18 @@ int ringbuffer_read(ring_buffer_t* prb, void *data, int len)
 	return 0;
 }
 
+int ringbuffer_unread(ring_buffer_t* prb, int len) 
+{
+	if (get_ringbuffer_avail_write_size(prb) < len) {
+		return -1;
+	}
+	prb->read_pos -= len;
+	if (prb->read_pos < 0) {
+		prb->read_pos += prb->size;
+	}
+	return 0;
+}
+
 int ringbuffer_lock_read2(
 		ring_buffer_t* prb,
 		struct pcap_pkthdr *pkthdr,
@@ -119,5 +136,4 @@ int ringbuffer_lock_read2(
 	pthread_mutex_unlock(&prb->mutex);
 	return 0;
 }
-
 
