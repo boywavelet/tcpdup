@@ -1,0 +1,23 @@
+sudo tcpdump -i any tcp port 23456 -nn
+
+create socket
+
+make_it_noblock:fcntl
+
+write first, if eagain or ewouldblock, event.events |= EPOLLOUT
+
+read with epoll_wait
+
+error check: EPOLLERR, EPOLLHUP etc
+
+
+
+
+You should use the following steps for an async connect:
+
+	create socket with socket(..., SOCK_NONBLOCK, ...)
+	start connection with connect(fd, ...)
+	if return value is neither 0 nor EINPROGRESS, then abort with error
+	wait until fd is signalled as ready for output
+	check status of socket with getsockopt(fd, SOL_SOCKET, SO_ERROR, ...)
+	done

@@ -1,4 +1,4 @@
-#include "ringbuffer.h"
+#include "tcpdup_ringbuffer.h"
 #include <string.h>
 #include <stdlib.h>
 #include <sys/mman.h>

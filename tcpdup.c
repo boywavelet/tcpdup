@@ -10,8 +10,8 @@
 #include <sys/socket.h>
 #include <sys/types.h>
 
-#include "tcp_util.h"
-#include "ringbuffer.h"
+#include "tcpdup_util.h"
+#include "tcpdup_ringbuffer.h"
 
 void print_app_data(const unsigned char* packet, int start, int end) 
 {

@@ -11,9 +11,9 @@
 #include <sys/epoll.h>
 #include <netinet/ip.h>
 #include <netinet/tcp.h>
-#include "net_util.h"
-#include "tcp_util.h"
-#include "ringbuffer.h"
+#include "tcpdup_net_util.h"
+#include "tcpdup_util.h"
+#include "tcpdup_ringbuffer.h"
 #include "tcpdup_container.h"
 
 void str_echo(int sockfd)
@@ -52,18 +52,13 @@ typedef struct transfer_config {
 	//TODO config fields
 } transfer_config_t;
 
-typedef struct fd_info {
-	int fd;
-	char ipport[6];
-	//TODO data fields
-} fd_info_t;
-
 void process_packet(
 		transfer_config_t *conf, 
 		int epfd,
 		struct pcap_pkthdr *pkthdr, 
 		char* packet, 
-		fix_hashmap_t *fd_map)
+		fix_hashmap_t *fd_map,
+		fix_hashmap_t *ipport_map)
 {
 	char ipport[6];
 	struct ip *iphdr = (struct ip*)(packet + SIZE_ETHERHDR);
@@ -74,20 +69,30 @@ void process_packet(
 	int size_tcphdr = tcphdr->doff * 4;
 	int payload_len = size_ip - size_iphdr - size_tcphdr;
 	if (memcmp(&iphdr->ip_dst, &conf->ori_dst, sizeof(struct in_addr)) == 0 
-			&& tcphdr->dest == conf->ori_dst_port) {
+			&& ntohs(tcphdr->dest) == conf->ori_dst_port) {
 		//process server-receive data
 		memcpy(ipport, &iphdr->ip_src, 4);
 		memcpy(ipport + 4, &tcphdr->source, 2);
-		fd_info_t *fd_info = lookup_fix_hashmap(fd_map, ipport);
+		fd_info_t *fd_info = lookup_fix_hashmap(ipport_map, ipport);
 		if (fd_info == NULL && tcphdr->syn) {
+			
 			//TODO create fd_info, record the start seq, create fd, put it to epoll
 		} else if (fd_info && (tcphdr->fin || tcphdr->rst)) { 
-			//TODO free fd_info, epoll remove
+			//free fd_info, epoll remove
+			int fd = fd_info->fd;
+			delnode_fix_hashmap(fd_map, &fd);
+			delnode_fix_hashmap(ipport_map, ipport);
+			//TODO remove data of fd_info
+			free(fd_info);
+			fd_info = NULL;
+			epoll_ctl(epfd, EPOLL_CTL_DEL, fd, NULL);
+			close(fd);
 		} else if (fd_info && payload_len > 0) {
 			//TODO reqeust data
 		} else {
+			//DO NOTHING, because
 			//1. data_len = 0, probably pure ack, nothing to do 
-			//2. bypass mid-data
+			//2. fd_info == NULL && !tcphdr->syn, bypass mid-data
 		}
 	} else {
 		//TODO server-response data, process fin && rst
@@ -98,28 +103,26 @@ void process_new_data(
 		transfer_config_t *conf, 
 		int epfd,
 		ring_buffer_t *buffer, 
-		int *buffer_status, 
-		fix_hashmap_t *fd_map)
+		fix_hashmap_t *fd_map,
+		fix_hashmap_t *ipport_map)
 {
 	struct pcap_pkthdr pkthdr;
 	char buf[2048];
 	while (1) {
-		if (*buffer_status == 0) {
-			int expect_size = sizeof(struct pcap_pkthdr);
-			if (get_ringbuffer_avail_read_size(buffer) > expect_size) {
-				ringbuffer_read(buffer, &pkthdr, sizeof(struct pcap_pkthdr));
-				int pack_len = pkthdr.len;
-				if (get_ringbuffer_avail_read_size(buffer) > pack_len) {
-					ringbuffer_read(buffer, buf, pack_len);
-					//process head + data
-					process_packet(conf, epfd, &pkthdr, buf, fd_map);
-				} else {
-					ringbuffer_unread(buffer, expect_size);
-					break;
-				}
+		int pkthdr_size = sizeof(struct pcap_pkthdr);
+		if (get_ringbuffer_avail_read_size(buffer) > pkthdr_size) {
+			ringbuffer_read(buffer, &pkthdr, pkthdr_size);
+			int pack_len = pkthdr.len;
+			if (get_ringbuffer_avail_read_size(buffer) > pack_len) {
+				ringbuffer_read(buffer, buf, pack_len);
+				//process head + data
+				process_packet(conf, epfd, &pkthdr, buf, fd_map, ipport_map);
 			} else {
+				ringbuffer_unread(buffer, pkthdr_size);
 				break;
 			}
+		} else {
+			break;
 		}
 	}
 }
@@ -161,12 +164,12 @@ void epoll_transfer(transfer_config_t *conf, int sockfd)
 	}
 	ring_buffer_t* buffer = NULL;
 	init_ringbuffer(&buffer, getpagesize());
-	int buffer_status = 0;//0, begin; 1: header; 
 
 	fix_hashmap_t *fd_map = NULL;
-	//TODO maybe wrong, make ori_src_ip + ori_src_port as key
-	//need two map? 1. fd as key 2. ipport as key
 	init_fix_hashmap(&fd_map, max_con_size, fd_hash, fd_equal); 
+	//both ip && port are network byte order
+	fix_hashmap_t *ipport_map = NULL;
+	init_fix_hashmap(&ipport_map, max_con_size, ipport_hash, ipport_equal); 
 
 	//set sockfd non-block, put it to epoll-loop
 	set_fd_nonblock(sockfd);
@@ -185,6 +188,7 @@ void epoll_transfer(transfer_config_t *conf, int sockfd)
 				epoll_ctl(epfd, EPOLL_CTL_DEL, fd, &event);
 				break;
 			} else if (event.events & EPOLLIN) {
+				//maybe read until drain
 				int len = read(fd, buf, 2000);
 				printf("Read len:%d\n", len);
 				if (len <= 0) {
@@ -193,7 +197,7 @@ void epoll_transfer(transfer_config_t *conf, int sockfd)
 					break;
 				} else {
 					ringbuffer_write(buffer, buf, len);
-					process_new_data(conf, epfd, buffer, &buffer_status, fd_map);
+					process_new_data(conf, epfd, buffer, fd_map, ipport_map);
 				}
 			}
 		} else {
@@ -201,9 +205,10 @@ void epoll_transfer(transfer_config_t *conf, int sockfd)
 				close(fd);
 				//TODO remove from fd_map
 			} else if (event.events & EPOLLOUT) {
-				//TODO write remain data
+				//TODO 1. check if connected. 2. write remain data
 			} else if (event.events & EPOLLIN) {
 				//read & discard
+				//maybe read until drain
 				read(fd, buf, 2000);
 			}
 		}
@@ -211,6 +216,7 @@ void epoll_transfer(transfer_config_t *conf, int sockfd)
 
 	//TODO remain fd's operations
 	
+	destroy_fix_hashmap(&ipport_map);
 	destroy_fix_hashmap(&fd_map);
 	destroy_ringbuffer(&buffer);
 	close(epfd);

@@ -80,3 +80,57 @@ void* delnode_fix_hashmap(fix_hashmap_t *pfh, void* key)
 	return NULL;
 }
 
+void init_slist(sorted_list_t **ppsl, slist_cmp cmp)
+{
+	*ppsl = malloc(sizeof(sorted_list_t));
+	(*ppsl)->head = NULL;
+	(*ppsl)->cmp = cmp;
+}
+
+void destroy_slist(sorted_list_t **ppsl, int free_payload)
+{
+	slist_node_t *node = (*ppsl)->head;
+	while (node != NULL) {
+		slist_node_t *to_del = node;
+		node = node->next;
+		if (free_payload) {
+			free(node->payload);
+		}
+		free(to_del);
+	}
+	free(*ppsl);
+}
+
+void* slist_insert(sorted_list_t *sl, void *payload) 
+{
+	slist_node_t *node = malloc(sizeof(slist_node_t));
+	node->payload = payload;
+	node->next = NULL;
+	if (sl->head == NULL || sl->cmp(sl->head->payload, payload) > 0) {
+		node->next = sl->head;
+		sl->head = node;
+	} else {
+		slist_node_t *prev = sl->head;
+		slist_node_t *now = prev->next;
+		while (now != NULL && sl->cmp(now->payload, payload) < 0) {
+			prev = prev->next;
+			now = now->next;
+		}
+		prev->next = node;
+		node->next = NULL;
+	}
+	return node;
+}
+
+void* slist_pop_first(sorted_list_t *sl) 
+{
+	if (sl->head == NULL) {
+		return NULL;
+	}
+	slist_node_t *node = sl->head;
+	sl->head = sl->head->next;
+	void* payload = node->payload;
+	free(node);
+	return payload;
+}
+
