@@ -110,7 +110,6 @@ int write_client_data_withretry(
 	return -1;
 }
 
-//TODO MAYBE:when start, need to send signal data to clear all buffer
 void* retransfer(void *arg) 
 {
 	mock_request_t* fr = (mock_request_t*)arg;
@@ -164,20 +163,63 @@ void* retransfer(void *arg)
 	return arg;
 }
 
+void print_help() 
+{
+	printf("tcpdup -i <net> -t <ip> -q <port> -s <ip> -p <port>\n");
+	printf("    -i <net>   netword interface name \n");
+	printf("    -t <ip>    monitored server ip\n");
+	printf("    -q <port>  monitored server port\n");
+	printf("    -s <ip>    transfer server ip\n");
+	printf("    -p <port>  transfer server port\n");
+	printf("    -h         Show This\n");
+}
+
 int main(int argc, char* argv[]) 
 {
-	if (argc != 2) {
-		printf("tcpdup <network-interface>\n");
+	if (argc < 2) {
+		print_help();
 		exit(1);
 	}
 	signal(SIGPIPE, SIG_IGN);
 
-	//TODO init all fields
-	char filter_input[256] = "tcp and ((dst 10.23.53.150 and dst port 12345) or (src 10.23.53.150 and src port 12345))";
-	int data_buffer_size = 100 * 1024 * 1024;
-	int debug = 1;
 	char* data_server_ip = "10.23.53.150";
 	u_int16_t data_server_port = 23456;
+	char* monitor_server_ip = "10.23.53.150";
+	u_int16_t monitor_server_port = 12345;
+	char* net_iface = "eth0";
+
+	char ch = '\0';
+	while ((ch = getopt(argc, argv, "s:p:t:q:i:h"))!= -1) {
+		switch(ch) {
+			case 's': 
+				data_server_ip = optarg;
+				break;
+			case 'p': 
+				data_server_port = (u_int16_t)(atoi(optarg));
+				break;
+			case 't': 
+				monitor_server_ip = optarg;
+				break;
+			case 'q': 
+				monitor_server_port = (u_int16_t)(atoi(optarg));
+				break;
+			case 'i': 
+				net_iface = optarg;
+				break;
+			case 'h': 
+				print_help();
+				exit(0);
+		}   
+	}
+	char filter_pattern[256] 
+		= "tcp and ((dst %s and dst port %d) or (src %s and src port %d))";
+	char filter_input[256]; 
+	sprintf(filter_input, filter_pattern, 
+			monitor_server_ip, monitor_server_port,
+			monitor_server_ip, monitor_server_port);
+
+	int data_buffer_size = 100 * 1024 * 1024;
+	int debug = DEBUG_LEVEL;
 
 	int count = 0;
 	bpf_u_int32 netaddr = 0, mask = 0;
@@ -188,8 +230,8 @@ int main(int argc, char* argv[])
 	char errbuf[PCAP_ERRBUF_SIZE];
 	memset(errbuf, 0, PCAP_ERRBUF_SIZE);
 	
-	descr = pcap_open_live(argv[1], MAXBYTES2CAPTURE, 1, 512, errbuf);
-	pcap_lookupnet(argv[1], &netaddr, &mask, errbuf);
+	descr = pcap_open_live(net_iface, MAXBYTES2CAPTURE, 1, 512, errbuf);
+	pcap_lookupnet(net_iface, &netaddr, &mask, errbuf);
 	pcap_compile(descr, &filter, filter_input, 1, mask);
 	pcap_setfilter(descr, &filter);
 

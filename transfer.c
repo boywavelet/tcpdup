@@ -12,46 +12,16 @@
 #include <sys/epoll.h>
 #include <netinet/ip.h>
 #include <netinet/tcp.h>
+#include <arpa/inet.h>
 #include "tcpdup_net_util.h"
 #include "tcpdup_util.h"
 #include "tcpdup_ringbuffer.h"
 #include "tcpdup_container.h"
 
-void str_echo(int sockfd)
-{
-	int len = 0;
-	char buf[2048];
-	while ((len = read(sockfd, buf, 2000)) > 0) {
-		int i;
-again:
-		printf("Read:%d\n", len);
-		for (i = 0; i < len; ++i) {
-			if (isprint(buf[i])) {
-				printf("%c", buf[i]);
-			}
-		}
-		printf("\n");
-		//write(sockfd, buf, len);
-	}
-
-	if (len < 0 && errno == EINTR) {
-		goto again;
-	} else if (len < 0) {
-		printf("read error\n");
-		close(sockfd);
-		exit(200);
-	} else if (len == 0) {
-		printf("read exit\n");
-		close(sockfd);
-		exit(0);
-	}
-}
-
 typedef struct transfer_config {
 	struct in_addr ori_dst;
 	u_int16_t ori_dst_port;
 	struct sockaddr_in transfer_addr;
-	//TODO config fields
 } transfer_config_t;
 
 void clean_fd(
@@ -88,7 +58,7 @@ void process_packet(
 	int size_tcphdr = tcphdr->doff * 4;
 	int payload_len = size_ip - size_iphdr - size_tcphdr;
 	if (memcmp(&iphdr->ip_dst, &conf->ori_dst, sizeof(struct in_addr)) == 0 
-			&& ntohs(tcphdr->dest) == conf->ori_dst_port) {
+			&& tcphdr->dest == conf->ori_dst_port) {
 		//process server-receive data
 		memcpy(ipport, &iphdr->ip_src, 4);
 		memcpy(ipport + 4, &tcphdr->source, 2);
@@ -293,14 +263,69 @@ void epoll_transfer(transfer_config_t *conf, int sockfd)
 	close(epfd);
 
 	//in case of the outer loop in main
+	//TODO will it be zombie? siganl(SIGCHILD)?
 	exit(0);
 }
 
-int main() 
+void print_help() 
+{
+	printf("transfer -t <ip> -q <port> -s <ip> -p <port>\n");
+	printf("    -t <ip>    monitored server ip\n");
+	printf("    -q <port>  monitored server port\n");
+	printf("    -s <ip>    transfer server ip\n");
+	printf("    -p <port>  transfer server port\n");
+	printf("    -h         Show This\n");
+}
+
+void init_config(transfer_config_t *pcon, int argc, char **argv)
+{
+	bzero(pcon, sizeof(transfer_config_t));
+	char* data_server_ip = "10.23.53.150";
+	u_int16_t data_server_port = 34567;
+	char* monitor_server_ip = "10.23.53.150";
+	u_int16_t monitor_server_port = 12345;
+	char ch = '\0';
+	while ((ch = getopt(argc, argv, "s:p:t:q:h"))!= -1) {
+		switch(ch) {
+			case 's': 
+				data_server_ip = optarg;
+				break;
+			case 'p': 
+				data_server_port = (u_int16_t)(atoi(optarg));
+				break;
+			case 't': 
+				monitor_server_ip = optarg;
+				break;
+			case 'q': 
+				monitor_server_port = (u_int16_t)(atoi(optarg));
+				break;
+			case 'h': 
+				print_help();
+				exit(0);
+		}   
+	}
+	(void)data_server_ip;
+	(void)data_server_port;
+	(void)monitor_server_ip;
+	(void)monitor_server_port;
+
+	inet_pton(AF_INET, monitor_server_ip, &pcon->ori_dst);
+	pcon->ori_dst_port = htons(monitor_server_port);
+	pcon->transfer_addr.sin_family = AF_INET;
+	pcon->transfer_addr.sin_port = htons(data_server_port);
+	inet_pton(AF_INET, data_server_ip, &pcon->transfer_addr.sin_addr);
+}
+
+int main(int argc, char **argv) 
 {
 	signal(SIGPIPE, SIG_IGN);
-	//TODO init conf
+	if (argc < 2) {
+		print_help();
+		exit(0);
+	}
+
 	transfer_config_t conf;
+	init_config(&conf, argc, argv);
 	int listenfd, connfd;
 	pid_t childpid;
 
