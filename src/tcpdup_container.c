@@ -134,3 +134,18 @@ void* slist_pop_first(sorted_list_t *sl)
 	return payload;
 }
 
+void slist_oneshot_iter(sorted_list_t *sl, slist_iter_func si_func, void *arg)
+{
+	slist_node_t *node = sl->head;
+	while (node != NULL) {
+		if (si_func(node->payload, arg)) {
+			slist_node_t *to_free = node;
+			node = node->next;
+			free(to_free);
+		} else {
+			break;
+		}
+	}
+	sl->head = node;
+}
+

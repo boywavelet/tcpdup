@@ -38,6 +38,8 @@ void* delnode_fix_hashmap(fix_hashmap_t *pfh, void* key);
 ///////////////////////////////////////////////////////////////////////
 
 typedef int (*slist_cmp)(void *payload1, void *payload2);
+//return if continue to access node->next 
+typedef int (*slist_iter_func)(void *payload, void *arg);
 
 typedef struct slist_node {
     void *payload;
@@ -56,4 +58,6 @@ void destroy_slist(sorted_list_t **ppsl, int free_payload);
 void* slist_insert(sorted_list_t *sl, void *payload);
 
 void* slist_pop_first(sorted_list_t *sl); 
+
+void slist_oneshot_iter(sorted_list_t *sl, slist_iter_func si_func, void *arg);
 

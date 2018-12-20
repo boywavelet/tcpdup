@@ -5,6 +5,7 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <ctype.h>
+#include <signal.h>
 #include <sys/socket.h>
 #include <sys/types.h>
 #include <netinet/ip.h>
@@ -49,8 +50,25 @@ again:
 typedef struct transfer_config {
 	struct in_addr ori_dst;
 	u_int16_t ori_dst_port;
+	struct sockaddr_in transfer_addr;
 	//TODO config fields
 } transfer_config_t;
+
+void clean_fd(
+		fd_info_t *fd_info,
+		int epfd,
+		fix_hashmap_t *fd_map,
+		fix_hashmap_t *ipport_map)
+{
+	int fd = fd_info->fd;
+	char *ipport = fd_info->ipport;
+	delnode_fix_hashmap(fd_map, &fd);
+	delnode_fix_hashmap(ipport_map, ipport);
+	destroy_fd_info(&fd_info);
+	fd_info = NULL;
+	epoll_ctl(epfd, EPOLL_CTL_DEL, fd, NULL);
+	close(fd);
+}
 
 void process_packet(
 		transfer_config_t *conf, 
@@ -61,6 +79,7 @@ void process_packet(
 		fix_hashmap_t *ipport_map)
 {
 	char ipport[6];
+	struct epoll_event event;
 	struct ip *iphdr = (struct ip*)(packet + SIZE_ETHERHDR);
 	struct tcphdr 
 		*tcphdr = (struct tcphdr*)(packet + SIZE_ETHERHDR + sizeof(struct ip));
@@ -75,27 +94,59 @@ void process_packet(
 		memcpy(ipport + 4, &tcphdr->source, 2);
 		fd_info_t *fd_info = lookup_fix_hashmap(ipport_map, ipport);
 		if (fd_info == NULL && tcphdr->syn) {
-			
-			//TODO create fd_info, record the start seq, create fd, put it to epoll
+			//create fd_info, record the start seq, create fd, put it to epoll
+			int fd = socket(AF_INET, SOCK_STREAM, 0); 
+			int ret = connect(fd, 
+					(const struct sockaddr *)&conf->transfer_addr, 
+					sizeof(struct sockaddr_in));
+			int connected = 1;
+			if (ret != 0) {
+				connected = 0;
+				if (errno == EINPROGRESS) {
+					event.events = EPOLLOUT;
+					event.data.fd = fd;
+					epoll_ctl(epfd, EPOLL_CTL_ADD, fd, &event);
+					init_fd_info(&fd_info, fd, ipport, connected, tcphdr->seq);
+					insert_fix_hashmap(fd_map, &fd_info->fd, fd_info); 
+					insert_fix_hashmap(ipport_map, &fd_info->ipport, fd_info); 
+				} else {
+					close(fd);
+				}
+			} else {
+				//nonblock connect complete immediately, rare
+				event.events = EPOLLOUT | EPOLLIN;
+				event.data.fd = fd;
+				epoll_ctl(epfd, EPOLL_CTL_ADD, fd, &event);
+				init_fd_info(&fd_info, fd, ipport, connected, tcphdr->seq);
+				insert_fix_hashmap(fd_map, &fd, fd_info); 
+				insert_fix_hashmap(ipport_map, ipport, fd_info); 
+			}
 		} else if (fd_info && (tcphdr->fin || tcphdr->rst)) { 
 			//free fd_info, epoll remove
-			int fd = fd_info->fd;
-			delnode_fix_hashmap(fd_map, &fd);
-			delnode_fix_hashmap(ipport_map, ipport);
-			//TODO remove data of fd_info
-			free(fd_info);
-			fd_info = NULL;
-			epoll_ctl(epfd, EPOLL_CTL_DEL, fd, NULL);
-			close(fd);
+			clean_fd(fd_info, epfd, fd_map, ipport_map);
 		} else if (fd_info && payload_len > 0) {
-			//TODO reqeust data
+			//emplace request data, try to write
+			char *payload = packet + SIZE_ETHERHDR + size_iphdr + size_tcphdr;
+			fd_info_emplace_data(fd_info, payload, payload_len, tcphdr->seq, 0);
+			fd_info_write_data(fd_info);
+			if (fd_info->closed) {
+				clean_fd(fd_info, epfd, fd_map, ipport_map);
+			}
 		} else {
-			//DO NOTHING, because
 			//1. data_len = 0, probably pure ack, nothing to do 
 			//2. fd_info == NULL && !tcphdr->syn, bypass mid-data
+			//3. fd_info != NULL && tcphdr->syn, weird, ignore
+			//DO NOTHING 
 		}
 	} else {
-		//TODO server-response data, process fin && rst
+		//server-response data, process fin && rst
+		memcpy(ipport, &iphdr->ip_dst, 4);
+		memcpy(ipport + 4, &tcphdr->dest, 2);
+		fd_info_t *fd_info = lookup_fix_hashmap(ipport_map, ipport);
+		if (fd_info != NULL && (tcphdr->fin || tcphdr->rst)) {
+			//MAYBE try to write-out the remaining data first
+			clean_fd(fd_info, epfd, fd_map, ipport_map);
+		}
 	}
 }
 
@@ -201,29 +252,53 @@ void epoll_transfer(transfer_config_t *conf, int sockfd)
 				}
 			}
 		} else {
+			fd_info_t *fd_info = lookup_fix_hashmap(fd_map, &fd);
+			if (fd_info == NULL) {
+				//won't happen though
+				epoll_ctl(epfd, EPOLL_CTL_DEL, fd, &event);
+				continue;
+			}
 			if (event.events & (EPOLLERR | EPOLLHUP | EPOLLRDHUP)) {
-				close(fd);
-				//TODO remove from fd_map
-			} else if (event.events & EPOLLOUT) {
-				//TODO 1. check if connected. 2. write remain data
-			} else if (event.events & EPOLLIN) {
-				//read & discard
-				//maybe read until drain
-				read(fd, buf, 2000);
+				clean_fd(fd_info, epfd, fd_map, ipport_map);
+			} else { 
+				if (event.events & EPOLLOUT) {
+					//1. check if connected: add EPOLLIN  2. write remain data
+					if (!fd_info->connected) {
+						//nonblock connect success
+						fd_info->connected = 1;
+						event.events = EPOLLOUT | EPOLLIN;
+						event.data.fd = fd;
+						epoll_ctl(epfd, EPOLL_CTL_MOD, fd, &event);
+					}
+					fd_info_write_data(fd_info);
+					if (fd_info->closed) {
+						clean_fd(fd_info, epfd, fd_map, ipport_map);
+					}
+				}
+				if (event.events & EPOLLIN) {
+					//read & discard
+					//maybe read until drain
+					read(fd, buf, 2000);
+				}
 			}
 		}
 	}
 
-	//TODO remain fd's operations
+	//MAYBE need to process remain fd's operations
+	//e.g. write all pending data
 	
 	destroy_fix_hashmap(&ipport_map);
 	destroy_fix_hashmap(&fd_map);
 	destroy_ringbuffer(&buffer);
 	close(epfd);
+
+	//in case of the outer loop in main
+	exit(0);
 }
 
 int main() 
 {
+	signal(SIGPIPE, SIG_IGN);
 	//TODO init conf
 	transfer_config_t conf;
 	int listenfd, connfd;
