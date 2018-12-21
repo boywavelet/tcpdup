@@ -18,7 +18,9 @@ add_library(tcpduplib STATIC ${SRC_LIST})
 
 add_executable (tcpdup tcpdup.c)
 add_executable (transfer transfer.c)
+add_executable (testall test_all.c)
 
 target_link_libraries(tcpdup tcpduplib pthread pcap)
 target_link_libraries(transfer tcpduplib pthread pcap)
+target_link_libraries(testall tcpduplib pthread pcap)
 

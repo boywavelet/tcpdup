@@ -16,6 +16,7 @@ typedef struct fix_hash_map {
     hmap_node_t **buckets;
     hash_func_t hash;
     equal_func_t equal;
+    //size is bucket-size, not the size of the elements
     int size;
 } fix_hashmap_t;
 
@@ -23,7 +24,7 @@ void init_fix_hashmap(
         fix_hashmap_t **ppfh, int size, 
         hash_func_t hf, equal_func_t ef);
 
-void destroy_fix_hashmap(fix_hashmap_t **ppfh);
+void destroy_fix_hashmap(fix_hashmap_t **ppfh, int free_payload);
 
 // return node->kv
 void* lookup_fix_hashmap(fix_hashmap_t *pfh, void* key);

@@ -1,6 +1,7 @@
 #include "tcpdup_container.h"
 #include <malloc.h>
 #include <stdlib.h>
+#include <string.h>
 
 void init_fix_hashmap(
 		fix_hashmap_t **ppfh, int size, 
@@ -8,13 +9,27 @@ void init_fix_hashmap(
 {
 	*ppfh = malloc(sizeof(fix_hashmap_t));
 	(*ppfh)->buckets = malloc(size * sizeof(hmap_node_t *));
+	memset((*ppfh)->buckets, 0, size * sizeof(hmap_node_t *));
 	(*ppfh)->hash = hf;
 	(*ppfh)->equal = ef;
 	(*ppfh)->size = size;
 }	
 
-void destroy_fix_hashmap(fix_hashmap_t **ppfh)
+void destroy_fix_hashmap(fix_hashmap_t **ppfh, int free_payload)
 {
+	int size = (*ppfh)->size;
+	int i = 0;
+	for (; i < size; ++i) {
+		hmap_node_t *node = (*ppfh)->buckets[i];
+		while (node != NULL) {
+			hmap_node_t *to_free = node;
+			if (free_payload) {
+				free(to_free->kv);
+			}
+			free(to_free);
+			node = node->next;
+		}
+	}
 	free((*ppfh)->buckets);
 	free(*ppfh);
 }
@@ -116,8 +131,8 @@ void* slist_insert(sorted_list_t *sl, void *payload)
 			prev = prev->next;
 			now = now->next;
 		}
+		node->next = prev->next;
 		prev->next = node;
-		node->next = NULL;
 	}
 	return node;
 }

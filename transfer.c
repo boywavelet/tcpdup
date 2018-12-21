@@ -257,8 +257,8 @@ void epoll_transfer(transfer_config_t *conf, int sockfd)
 	//MAYBE need to process remain fd's operations
 	//e.g. write all pending data
 	
-	destroy_fix_hashmap(&ipport_map);
-	destroy_fix_hashmap(&fd_map);
+	destroy_fix_hashmap(&ipport_map, 0);
+	destroy_fix_hashmap(&fd_map, 1);
 	destroy_ringbuffer(&buffer);
 	close(epfd);
 
