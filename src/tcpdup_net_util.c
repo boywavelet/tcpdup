@@ -26,8 +26,10 @@ void init_fd_info(
 	*ppfi = malloc(sizeof(fd_info_t));
 	(*ppfi)->fd = fd;
 	memcpy((*ppfi)->ipport, ipport, 6);
-	(*ppfi)->connected = 0;
+	(*ppfi)->connected = connected;
 	(*ppfi)->closed = 0;
+	(*ppfi)->stat_total_write = 0;
+	(*ppfi)->stat_num_packet = 0;
 	(*ppfi)->tcp_seq= tcp_seq;
 	init_slist(&(*ppfi)->data_list, fd_packet_cmp);
 }
@@ -38,7 +40,9 @@ void destroy_fd_info(fd_info_t **ppfi)
 	free(*ppfi);
 }
 
-void* fd_info_emplace_data(fd_info_t *pfi, void* data, int len, int tcp_seq, int is_fin) 
+void* fd_info_emplace_data(
+		fd_info_t *pfi, void* data, int len, 
+		unsigned int tcp_seq, int is_fin) 
 {
 	int size = sizeof(fd_packet_t) + len;
 	fd_packet_t *fp = malloc(size);
@@ -50,12 +54,13 @@ void* fd_info_emplace_data(fd_info_t *pfi, void* data, int len, int tcp_seq, int
 	memcpy(fp->packet, data, len);
 	fp->data = fp->packet;
 	slist_insert(pfi->data_list, fp);
+	pfi->stat_num_packet++;
 	return fp;
 }
 
 int write_packet_data(void *payload, void *arg)
 {
-	fd_packet_t *packet = (fd_packet_t *)packet;
+	fd_packet_t *packet = (fd_packet_t *)payload;
 	fd_info_t *pfi = (fd_info_t *)arg;
 	if (!pfi->connected || pfi->closed) {
 		return 0;
@@ -65,11 +70,14 @@ int write_packet_data(void *payload, void *arg)
 	}
 	int write_ret = write(pfi->fd, packet->data, packet->packet_len);
 	if (write_ret == packet->packet_len) {
+		pfi->stat_total_write += write_ret;
 		pfi->tcp_seq += write_ret;
-		//free payload
+		//all the payload consumed
 		free(payload);
+		pfi->stat_num_packet--;
 		return 1;
 	} else if (write_ret > 0) {
+		pfi->stat_total_write += write_ret;
 		packet->data += write_ret;
 		packet->packet_len -= write_ret;
 		pfi->tcp_seq += write_ret;
@@ -90,6 +98,4 @@ void fd_info_write_data(fd_info_t *pfi)
 {
 	slist_oneshot_iter(pfi->data_list, write_packet_data, pfi);
 }
-
-
 

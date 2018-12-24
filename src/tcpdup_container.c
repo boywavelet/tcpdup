@@ -109,7 +109,7 @@ void destroy_slist(sorted_list_t **ppsl, int free_payload)
 		slist_node_t *to_del = node;
 		node = node->next;
 		if (free_payload) {
-			free(node->payload);
+			free(to_del->payload);
 		}
 		free(to_del);
 	}

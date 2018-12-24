@@ -262,8 +262,6 @@ void epoll_transfer(transfer_config_t *conf, int sockfd)
 	destroy_ringbuffer(&buffer);
 	close(epfd);
 
-	//in case of the outer loop in main
-	//TODO will it be zombie? siganl(SIGCHILD)?
 	exit(0);
 }
 
@@ -304,10 +302,6 @@ void init_config(transfer_config_t *pcon, int argc, char **argv)
 				exit(0);
 		}   
 	}
-	(void)data_server_ip;
-	(void)data_server_port;
-	(void)monitor_server_ip;
-	(void)monitor_server_port;
 
 	inet_pton(AF_INET, monitor_server_ip, &pcon->ori_dst);
 	pcon->ori_dst_port = htons(monitor_server_port);
@@ -319,6 +313,7 @@ void init_config(transfer_config_t *pcon, int argc, char **argv)
 int main(int argc, char **argv) 
 {
 	signal(SIGPIPE, SIG_IGN);
+	signal(SIGCHLD, SIG_IGN);
 	if (argc < 2) {
 		print_help();
 		exit(0);
