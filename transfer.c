@@ -37,6 +37,7 @@ void clean_fd(
 	destroy_fd_info(&fd_info);
 	fd_info = NULL;
 	epoll_ctl(epfd, EPOLL_CTL_DEL, fd, NULL);
+	//TODO MAYBE it's better setlinger to send RST instead of FIN
 	close(fd);
 }
 
@@ -65,7 +66,7 @@ void process_packet(
 		fd_info_t *fd_info = lookup_fix_hashmap(ipport_map, ipport);
 		if (fd_info == NULL && tcphdr->syn) {
 			//create fd_info, record the start seq, create fd, put it to epoll
-			int fd = socket(AF_INET, SOCK_STREAM, 0); 
+			int fd = socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK, 0); 
 			int ret = connect(fd, 
 					(const struct sockaddr *)&conf->transfer_addr, 
 					sizeof(struct sockaddr_in));
@@ -76,7 +77,7 @@ void process_packet(
 					event.events = EPOLLOUT;
 					event.data.fd = fd;
 					epoll_ctl(epfd, EPOLL_CTL_ADD, fd, &event);
-					init_fd_info(&fd_info, fd, ipport, connected, tcphdr->seq);
+					init_fd_info(&fd_info, fd, ipport, connected, ntohl(tcphdr->seq));
 					insert_fix_hashmap(fd_map, &fd_info->fd, fd_info); 
 					insert_fix_hashmap(ipport_map, &fd_info->ipport, fd_info); 
 				} else {
@@ -87,17 +88,19 @@ void process_packet(
 				event.events = EPOLLOUT | EPOLLIN;
 				event.data.fd = fd;
 				epoll_ctl(epfd, EPOLL_CTL_ADD, fd, &event);
-				init_fd_info(&fd_info, fd, ipport, connected, tcphdr->seq);
+				init_fd_info(&fd_info, fd, ipport, connected, ntohl(tcphdr->seq));
 				insert_fix_hashmap(fd_map, &fd, fd_info); 
 				insert_fix_hashmap(ipport_map, ipport, fd_info); 
 			}
 		} else if (fd_info && (tcphdr->fin || tcphdr->rst)) { 
+			//last chance to write data
+			fd_info_write_data(fd_info);
 			//free fd_info, epoll remove
 			clean_fd(fd_info, epfd, fd_map, ipport_map);
 		} else if (fd_info && payload_len > 0) {
 			//emplace request data, try to write
 			char *payload = packet + SIZE_ETHERHDR + size_iphdr + size_tcphdr;
-			fd_info_emplace_data(fd_info, payload, payload_len, tcphdr->seq, 0);
+			fd_info_emplace_data(fd_info, payload, payload_len, ntohl(tcphdr->seq), 0);
 			fd_info_write_data(fd_info);
 			if (fd_info->closed) {
 				clean_fd(fd_info, epfd, fd_map, ipport_map);
@@ -114,7 +117,8 @@ void process_packet(
 		memcpy(ipport + 4, &tcphdr->dest, 2);
 		fd_info_t *fd_info = lookup_fix_hashmap(ipport_map, ipport);
 		if (fd_info != NULL && (tcphdr->fin || tcphdr->rst)) {
-			//MAYBE try to write-out the remaining data first
+			//try to write-out the remaining data first
+			fd_info_write_data(fd_info);
 			clean_fd(fd_info, epfd, fd_map, ipport_map);
 		}
 	}
@@ -178,7 +182,7 @@ int ipport_equal(void *keyvalue, void *key)
 
 void epoll_transfer(transfer_config_t *conf, int sockfd) 
 {
-	int max_con_size = 128;
+	int max_con_size = 1024;
 	int epfd = epoll_create(max_con_size);
 	if (epfd < 0) {
 		perror("epoll create failed");
@@ -211,7 +215,7 @@ void epoll_transfer(transfer_config_t *conf, int sockfd)
 			} else if (event.events & EPOLLIN) {
 				//maybe read until drain
 				int len = read(fd, buf, 2000);
-				printf("Read len:%d\n", len);
+				printf("Read data len:%d\n", len);
 				if (len <= 0) {
 					close(fd);
 					epoll_ctl(epfd, EPOLL_CTL_DEL, fd, &event);
@@ -278,10 +282,10 @@ void print_help()
 void init_config(transfer_config_t *pcon, int argc, char **argv)
 {
 	bzero(pcon, sizeof(transfer_config_t));
-	char* data_server_ip = "10.23.53.150";
-	u_int16_t data_server_port = 34567;
-	char* monitor_server_ip = "10.23.53.150";
-	u_int16_t monitor_server_port = 12345;
+	char* data_server_ip = "127.0.0.1";
+	u_int16_t data_server_port = 0;
+	char* monitor_server_ip = "127.0.0.1";
+	u_int16_t monitor_server_port = 0;
 	char ch = '\0';
 	while ((ch = getopt(argc, argv, "s:p:t:q:h"))!= -1) {
 		switch(ch) {
