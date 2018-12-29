@@ -37,3 +37,5 @@ void* fd_info_emplace_data(
 
 void fd_info_write_data(fd_info_t *pfi);
 
+int is_fd_info_has_writable_data(fd_info_t *pfi);
+

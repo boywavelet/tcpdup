@@ -99,7 +99,10 @@ int write_client_data_withretry(
 {
 	while (1) {
 		if (0 == write_client_data(*sock, pkthdr, packet, packet_len)) {
-			printf("Write data success:%ld\n", packet_len + sizeof(struct pcap_pkthdr));
+			if (DEBUG_LEVEL == 2) {
+				printf("Write data success:%ld\n", 
+						packet_len + sizeof(struct pcap_pkthdr));
+			}
 			return 0;
 		} else {
 			printf("Write data failed, Retrying...\n");
@@ -268,9 +271,11 @@ int main(int argc, char* argv[])
 				packet, pkthdr.len);
 
 		++count;
-		printf ("CURRENT READ: %d, WRITE:%d, AVAIL:%d\n", 
-				buffer->read_pos, buffer->write_pos, 
-				get_ringbuffer_avail_write_size(buffer));
+		if (DEBUG_LEVEL) {
+			printf ("CURRENT READ: %d, WRITE:%d, AVAIL:%d\n", 
+					buffer->read_pos, buffer->write_pos, 
+					get_ringbuffer_avail_write_size(buffer));
+		}
 	}
 
 	pthread_join(retransfer_thread, NULL);

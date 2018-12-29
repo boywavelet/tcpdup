@@ -149,6 +149,23 @@ void* slist_pop_first(sorted_list_t *sl)
 	return payload;
 }
 
+void* slist_peek_first(sorted_list_t *sl) 
+{
+	if (sl->head == NULL) {
+		return NULL;
+	}
+	return sl->head->payload;
+}
+
+int is_slist_empty(sorted_list_t *sl)
+{
+	if (sl->head == NULL) {
+		return 1;
+	} else {
+		return 0;
+	}
+}
+
 void slist_oneshot_iter(sorted_list_t *sl, slist_iter_func si_func, void *arg)
 {
 	slist_node_t *node = sl->head;

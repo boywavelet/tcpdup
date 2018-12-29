@@ -37,7 +37,7 @@ void clean_fd(
 	destroy_fd_info(&fd_info);
 	fd_info = NULL;
 	epoll_ctl(epfd, EPOLL_CTL_DEL, fd, NULL);
-	//TODO MAYBE it's better setlinger to send RST instead of FIN
+	//MAYBE it's better setlinger to send RST instead of FIN
 	close(fd);
 }
 
@@ -85,7 +85,8 @@ void process_packet(
 				}
 			} else {
 				//nonblock connect complete immediately, rare
-				event.events = EPOLLOUT | EPOLLIN;
+				//no data to write at first
+				event.events = EPOLLIN;
 				event.data.fd = fd;
 				epoll_ctl(epfd, EPOLL_CTL_ADD, fd, &event);
 				init_fd_info(&fd_info, fd, ipport, connected, ntohl(tcphdr->seq));
@@ -93,6 +94,7 @@ void process_packet(
 				insert_fix_hashmap(ipport_map, ipport, fd_info); 
 			}
 		} else if (fd_info && (tcphdr->fin || tcphdr->rst)) { 
+			//MAYBE: packet may contain both fin|rst and data
 			//last chance to write data
 			fd_info_write_data(fd_info);
 			//free fd_info, epoll remove
@@ -102,6 +104,12 @@ void process_packet(
 			char *payload = packet + SIZE_ETHERHDR + size_iphdr + size_tcphdr;
 			fd_info_emplace_data(fd_info, payload, payload_len, ntohl(tcphdr->seq), 0);
 			fd_info_write_data(fd_info);
+			//only if remain data, modify epoll events
+			if (is_fd_info_has_writable_data(fd_info)) {
+				event.events = EPOLLIN | EPOLLOUT;
+				event.data.fd = fd_info->fd;
+				epoll_ctl(epfd, EPOLL_CTL_MOD, fd_info->fd, &event);
+			}
 			if (fd_info->closed) {
 				clean_fd(fd_info, epfd, fd_map, ipport_map);
 			}
@@ -132,7 +140,7 @@ void process_new_data(
 		fix_hashmap_t *ipport_map)
 {
 	struct pcap_pkthdr pkthdr;
-	char buf[2048];
+	char *buf = malloc(2048);
 	while (1) {
 		int pkthdr_size = sizeof(struct pcap_pkthdr);
 		if (get_ringbuffer_avail_read_size(buffer) > pkthdr_size) {
@@ -150,17 +158,18 @@ void process_new_data(
 			break;
 		}
 	}
+	free(buf);
 }
 
 int fd_hash(void *key) 
 {
-	int* pfd = (int *)key;
+	int *pfd = (int *)key;
 	return *pfd;
 }
 
 int fd_equal(void *keyvalue, void *key)
 {
-	fd_info_t* pkv = (fd_info_t *)keyvalue;
+	fd_info_t *pkv = (fd_info_t *)keyvalue;
 	int *pfd = (int *)key;
 	return pkv->fd == *pfd;
 }
@@ -168,15 +177,15 @@ int fd_equal(void *keyvalue, void *key)
 int ipport_hash(void *key) 
 {
 	//ipport is char[6], 0~5, make range 2~5 as int
-	const char* pfd = (const char*)key;
+	const char *pfd = (const char *)key;
 	return *(int *)(pfd + 2);
 }
 
 int ipport_equal(void *keyvalue, void *key)
 {
 	//ipport is char[6]
-	const char* pfd = (const char*)key;
-	fd_info_t* pkv = (fd_info_t *)keyvalue;
+	const char *pfd = (const char *)key;
+	fd_info_t *pkv = (fd_info_t *)keyvalue;
 	return memcmp(pfd, pkv->ipport, 6) == 0; 
 }
 
@@ -198,61 +207,74 @@ void epoll_transfer(transfer_config_t *conf, int sockfd)
 
 	//set sockfd non-block, put it to epoll-loop
 	set_fd_nonblock(sockfd);
-	struct epoll_event event;
-	event.events = EPOLLIN;
-	event.data.fd = sockfd;
-	epoll_ctl(epfd, EPOLL_CTL_ADD, sockfd, &event);
+
+	//MAYBE destroy LONG-TIME IDLE socket
+	struct epoll_event *events = malloc(sizeof(struct epoll_event) * max_con_size);
+	int num_events = 0;
+
+	events[0].events = EPOLLIN;
+	events[0].data.fd = sockfd;
+	epoll_ctl(epfd, EPOLL_CTL_ADD, sockfd, &events[0]);
 	
 	//read from sockfd and write data to buffer
-	char buf[2048];
-	while (epoll_wait(epfd, &event, 1, -1)) {
-		int fd = event.data.fd;
-		if (fd == sockfd) {
-			if (event.events & (EPOLLERR | EPOLLHUP | EPOLLRDHUP)) {
-				close(fd);
-				epoll_ctl(epfd, EPOLL_CTL_DEL, fd, &event);
-				break;
-			} else if (event.events & EPOLLIN) {
-				//maybe read until drain
-				int len = read(fd, buf, 2000);
-				printf("Read data len:%d\n", len);
-				if (len <= 0) {
+	char *buf = malloc(2048);
+	//always true
+	while ((num_events = epoll_wait(epfd, events, max_con_size, -1)) > 0) {
+		int i = 0;
+		for (; i < num_events; ++i) {
+			int fd = events[i].data.fd;
+			if (fd == sockfd) {
+				if (events[i].events & (EPOLLERR | EPOLLHUP | EPOLLRDHUP)) {
 					close(fd);
-					epoll_ctl(epfd, EPOLL_CTL_DEL, fd, &event);
+					epoll_ctl(epfd, EPOLL_CTL_DEL, fd, &events[i]);
 					break;
-				} else {
+				} else if (events[i].events & EPOLLIN) {
+					//maybe read until drain
+					int len = read(fd, buf, 2000);
+					if (len == 0) {
+						close(fd);
+						epoll_ctl(epfd, EPOLL_CTL_DEL, fd, &events[i]);
+						break;
+					}
+					if (DEBUG_LEVEL >= 2) {
+						printf("Read data len:%d\n", len);
+					}
 					ringbuffer_write(buffer, buf, len);
 					process_new_data(conf, epfd, buffer, fd_map, ipport_map);
 				}
-			}
-		} else {
-			fd_info_t *fd_info = lookup_fix_hashmap(fd_map, &fd);
-			if (fd_info == NULL) {
-				//won't happen though
-				epoll_ctl(epfd, EPOLL_CTL_DEL, fd, &event);
-				continue;
-			}
-			if (event.events & (EPOLLERR | EPOLLHUP | EPOLLRDHUP)) {
-				clean_fd(fd_info, epfd, fd_map, ipport_map);
-			} else { 
-				if (event.events & EPOLLOUT) {
-					//1. check if connected: add EPOLLIN  2. write remain data
-					if (!fd_info->connected) {
-						//nonblock connect success
-						fd_info->connected = 1;
-						event.events = EPOLLOUT | EPOLLIN;
-						event.data.fd = fd;
-						epoll_ctl(epfd, EPOLL_CTL_MOD, fd, &event);
-					}
-					fd_info_write_data(fd_info);
-					if (fd_info->closed) {
-						clean_fd(fd_info, epfd, fd_map, ipport_map);
-					}
+			} else {
+				fd_info_t *fd_info = lookup_fix_hashmap(fd_map, &fd);
+				if (fd_info == NULL) {
+					//won't happen though
+					epoll_ctl(epfd, EPOLL_CTL_DEL, fd, &events[i]);
+					continue;
 				}
-				if (event.events & EPOLLIN) {
-					//read & discard
-					//maybe read until drain
-					read(fd, buf, 2000);
+				if (events[i].events & (EPOLLERR | EPOLLHUP | EPOLLRDHUP)) {
+					clean_fd(fd_info, epfd, fd_map, ipport_map);
+				} else { 
+					if (events[i].events & EPOLLIN) {
+						//read & discard, read until drain
+						while (read(fd, buf, 2000) == 2000);
+					}
+					if (events[i].events & EPOLLOUT) {
+						//1. check if connected: add EPOLLIN  2. write remain data
+						if (!fd_info->connected) {
+							//nonblock connect success
+							fd_info->connected = 1;
+							events[i].events = EPOLLIN;
+						}
+						fd_info_write_data(fd_info);
+						if (is_fd_info_has_writable_data(fd_info)) {
+							events[i].events = EPOLLIN | EPOLLOUT;
+						}
+						if (fd_info->closed) {
+							clean_fd(fd_info, epfd, fd_map, ipport_map);
+						} else {
+							//MAYBE set only when there is remain data
+							//EPOLLIN is always ON for connected socket
+							epoll_ctl(epfd, EPOLL_CTL_MOD, fd, &events[i]);
+						}
+					}
 				}
 			}
 		}
@@ -261,6 +283,8 @@ void epoll_transfer(transfer_config_t *conf, int sockfd)
 	//MAYBE need to process remain fd's operations
 	//e.g. write all pending data
 	
+	free(buf);
+	free(events);
 	destroy_fix_hashmap(&ipport_map, 0);
 	destroy_fix_hashmap(&fd_map, 1);
 	destroy_ringbuffer(&buffer);

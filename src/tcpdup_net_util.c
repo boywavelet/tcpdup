@@ -79,6 +79,7 @@ int write_packet_data(void *payload, void *arg)
 	} else if (write_ret > 0) {
 		pfi->stat_total_write += write_ret;
 		packet->data += write_ret;
+		packet->tcp_seq += write_ret;
 		packet->packet_len -= write_ret;
 		pfi->tcp_seq += write_ret;
 		return 0;
@@ -97,5 +98,18 @@ int write_packet_data(void *payload, void *arg)
 void fd_info_write_data(fd_info_t *pfi)
 {
 	slist_oneshot_iter(pfi->data_list, write_packet_data, pfi);
+}
+
+int is_fd_info_has_writable_data(fd_info_t *pfi)
+{
+	if (is_slist_empty(pfi->data_list)) {
+		return 0;
+	}
+	fd_packet_t *packet = (fd_packet_t *)slist_peek_first(pfi->data_list);
+	if (pfi->tcp_seq + 1 == packet->tcp_seq) {
+		return 1;
+	} else {
+		return 0;
+	}
 }
 

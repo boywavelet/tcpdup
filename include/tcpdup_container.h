@@ -58,7 +58,13 @@ void destroy_slist(sorted_list_t **ppsl, int free_payload);
 //return slist_node_t* {payload}
 void* slist_insert(sorted_list_t *sl, void *payload);
 
+//return payload *
 void* slist_pop_first(sorted_list_t *sl); 
+
+//return payload *
+void* slist_peek_first(sorted_list_t *sl); 
+
+int is_slist_empty(sorted_list_t *sl);
 
 void slist_oneshot_iter(sorted_list_t *sl, slist_iter_func si_func, void *arg);
 
