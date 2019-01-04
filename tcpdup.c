@@ -99,7 +99,7 @@ int write_client_data_withretry(
 {
 	while (1) {
 		if (0 == write_client_data(*sock, pkthdr, packet, packet_len)) {
-			if (DEBUG_LEVEL == 2) {
+			if (DEBUG_LEVEL == 3) {
 				printf("Write data success:%ld\n", 
 						packet_len + sizeof(struct pcap_pkthdr));
 			}
@@ -140,17 +140,20 @@ void* retransfer(void *arg)
 		int size_iphdr = sizeof(struct ip);
 		int size_tcphdr = tcphdr->doff * 4;
 		int payload_len = size_ip - size_iphdr - size_tcphdr;
-		if (debug == 2) {
-			printf ("Received Size: %d\n", pkthdr.len);
-			printf ("SRC IP: %s:\n", inet_ntoa(iphdr->ip_src));
-			printf ("SRC PORT: %d:\n", ntohs(tcphdr->th_sport));
-			printf ("DST IP: %s:\n", inet_ntoa(iphdr->ip_dst));
-			printf ("DST PORT: %d:\n", ntohs(tcphdr->th_dport));
-			printf ("PAYLOADLEN: %d:\n", payload_len);
-			printf ("SEQ: %u; ACK:%u\n", ntohl(tcphdr->seq), ntohl(tcphdr->ack_seq));
+		if (debug >= 2) {
+			printf ("Received Size: %d, ", pkthdr.len);
+			printf ("SRC IP: %s:, ", inet_ntoa(iphdr->ip_src));
+			printf ("SRC PORT: %d:, ", ntohs(tcphdr->th_sport));
+			printf ("DST IP: %s:, ", inet_ntoa(iphdr->ip_dst));
+			printf ("DST PORT: %d:, ", ntohs(tcphdr->th_dport));
+			printf ("PAYLOADLEN: %d:, ", payload_len);
+			printf ("SEQ: %u; ACK:%u, ", ntohl(tcphdr->seq), ntohl(tcphdr->ack_seq));
 			printf ("FLAG syn: %d, fin:%d, rst:%d, ack:%d\n", 
 					tcphdr->syn, tcphdr->fin, tcphdr->rst, tcphdr->ack);
-			print_app_data(packet, SIZE_ETHERHDR + size_iphdr + size_tcphdr, pkthdr.len);
+			if (debug >= 3) {
+				print_app_data(
+						packet, SIZE_ETHERHDR + size_iphdr + size_tcphdr, pkthdr.len);
+			}
 		}
 		
 		//retry as many times as we can
@@ -190,9 +193,10 @@ int main(int argc, char* argv[])
 	char* monitor_server_ip = "10.23.53.150";
 	u_int16_t monitor_server_port = 12345;
 	char* net_iface = "eth0";
+	int debug = 0;
 
 	char ch = '\0';
-	while ((ch = getopt(argc, argv, "s:p:t:q:i:h"))!= -1) {
+	while ((ch = getopt(argc, argv, "s:p:t:q:i:d:h"))!= -1) {
 		switch(ch) {
 			case 's': 
 				data_server_ip = optarg;
@@ -209,6 +213,9 @@ int main(int argc, char* argv[])
 			case 'i': 
 				net_iface = optarg;
 				break;
+			case 'd': 
+				debug = atoi(optarg);
+				break;
 			case 'h': 
 				print_help();
 				exit(0);
@@ -222,7 +229,6 @@ int main(int argc, char* argv[])
 			monitor_server_ip, monitor_server_port);
 
 	int data_buffer_size = 100 * 1024 * 1024;
-	int debug = DEBUG_LEVEL;
 
 	int count = 0;
 	bpf_u_int32 netaddr = 0, mask = 0;
@@ -271,7 +277,7 @@ int main(int argc, char* argv[])
 				packet, pkthdr.len);
 
 		++count;
-		if (DEBUG_LEVEL) {
+		if (debug >= 2) {
 			printf ("CURRENT READ: %d, WRITE:%d, AVAIL:%d\n", 
 					buffer->read_pos, buffer->write_pos, 
 					get_ringbuffer_avail_write_size(buffer));

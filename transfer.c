@@ -22,6 +22,7 @@ typedef struct transfer_config {
 	struct in_addr ori_dst;
 	u_int16_t ori_dst_port;
 	struct sockaddr_in transfer_addr;
+	int debug;
 } transfer_config_t;
 
 void clean_fd(
@@ -49,6 +50,7 @@ void process_packet(
 		fix_hashmap_t *fd_map,
 		fix_hashmap_t *ipport_map)
 {
+	int debug = conf->debug;
 	char ipport[6];
 	struct epoll_event event;
 	struct ip *iphdr = (struct ip*)(packet + SIZE_ETHERHDR);
@@ -93,12 +95,28 @@ void process_packet(
 				insert_fix_hashmap(fd_map, &fd, fd_info); 
 				insert_fix_hashmap(ipport_map, ipport, fd_info); 
 			}
+			if (debug > 0) {
+				printf("Syn. Open new Connection\n");
+			}
 		} else if (fd_info && (tcphdr->fin || tcphdr->rst)) { 
 			//MAYBE: packet may contain both fin|rst and data
-			//last chance to write data
+			//second-last chance to write data
+			char *payload = packet + SIZE_ETHERHDR + size_iphdr + size_tcphdr;
+			fd_info_emplace_data(fd_info, payload, payload_len, ntohl(tcphdr->seq), 1);
 			fd_info_write_data(fd_info);
-			//free fd_info, epoll remove
-			clean_fd(fd_info, epfd, fd_map, ipport_map);
+			//check whether we have full-data 
+			if (!fd_info_is_consecutive(fd_info)) {
+				//free fd_info, epoll remove
+				clean_fd(fd_info, epfd, fd_map, ipport_map);
+				if (debug > 0) {
+					printf("Fin|Rst. Close Connection, %d\n", fd_info->stat_num_packet);
+				}
+			} else {
+				//close operation is postponed to write
+				if (debug > 0) {
+					printf("Fin|Rst. Defer Close, %d\n", fd_info->stat_num_packet);
+				}
+			}
 		} else if (fd_info && payload_len > 0) {
 			//emplace request data, try to write
 			char *payload = packet + SIZE_ETHERHDR + size_iphdr + size_tcphdr;
@@ -113,11 +131,17 @@ void process_packet(
 			if (fd_info->closed) {
 				clean_fd(fd_info, epfd, fd_map, ipport_map);
 			}
+			if (debug > 0) {
+				printf("Client Data. transfer\n");
+			}
 		} else {
 			//1. data_len = 0, probably pure ack, nothing to do 
 			//2. fd_info == NULL && !tcphdr->syn, bypass mid-data
 			//3. fd_info != NULL && tcphdr->syn, weird, ignore
 			//DO NOTHING 
+			if (debug > 0) {
+				printf("ack|old-con-data. bypass\n");
+			}
 		}
 	} else {
 		//server-response data, process fin && rst
@@ -127,7 +151,21 @@ void process_packet(
 		if (fd_info != NULL && (tcphdr->fin || tcphdr->rst)) {
 			//try to write-out the remaining data first
 			fd_info_write_data(fd_info);
-			clean_fd(fd_info, epfd, fd_map, ipport_map);
+			if (!fd_info_is_consecutive(fd_info)) {
+				clean_fd(fd_info, epfd, fd_map, ipport_map);
+				if (debug > 0) {
+					printf("Server Fin|Rst, close connection\n");
+				}
+			} else {
+				fd_info_append_fin(fd_info);
+				if (debug > 0) {
+					printf("Server Fin|Rst, defer close\n");
+				}
+			}
+		} else {
+			if (debug > 0) {
+				printf("Server Resp, bypass\n");
+			}
 		}
 	}
 }
@@ -139,6 +177,9 @@ void process_new_data(
 		fix_hashmap_t *fd_map,
 		fix_hashmap_t *ipport_map)
 {
+	//MAYBE: one big read may contain many packets of one connection
+	//e.g. SYN, DATA, FIN. connection may be not ready when check the data,
+	//possibly lose request
 	struct pcap_pkthdr pkthdr;
 	char *buf = malloc(2048);
 	while (1) {
@@ -146,7 +187,7 @@ void process_new_data(
 		if (get_ringbuffer_avail_read_size(buffer) > pkthdr_size) {
 			ringbuffer_read(buffer, &pkthdr, pkthdr_size);
 			int pack_len = pkthdr.len;
-			if (get_ringbuffer_avail_read_size(buffer) > pack_len) {
+			if (get_ringbuffer_avail_read_size(buffer) >= pack_len) {
 				ringbuffer_read(buffer, buf, pack_len);
 				//process head + data
 				process_packet(conf, epfd, &pkthdr, buf, fd_map, ipport_map);
@@ -191,6 +232,7 @@ int ipport_equal(void *keyvalue, void *key)
 
 void epoll_transfer(transfer_config_t *conf, int sockfd) 
 {
+	int debug = conf->debug;
 	int max_con_size = 1024;
 	int epfd = epoll_create(max_con_size);
 	if (epfd < 0) {
@@ -236,7 +278,7 @@ void epoll_transfer(transfer_config_t *conf, int sockfd)
 						epoll_ctl(epfd, EPOLL_CTL_DEL, fd, &events[i]);
 						break;
 					}
-					if (DEBUG_LEVEL >= 2) {
+					if (debug >= 2) {
 						printf("Read data len:%d\n", len);
 					}
 					ringbuffer_write(buffer, buf, len);
@@ -254,11 +296,19 @@ void epoll_transfer(transfer_config_t *conf, int sockfd)
 				} else { 
 					if (events[i].events & EPOLLIN) {
 						//read & discard, read until drain
-						while (read(fd, buf, 2000) == 2000);
+						int len = 0;
+						while ((len = read(fd, buf, 2000)) == 2000);
+						//if read 0, close
+						if (len == 0) {
+							clean_fd(fd_info, epfd, fd_map, ipport_map);
+						}
 					}
 					if (events[i].events & EPOLLOUT) {
 						//1. check if connected: add EPOLLIN  2. write remain data
 						if (!fd_info->connected) {
+							if (debug >= 1) {
+								printf("Connection success%d\n", fd_info->stat_num_packet);
+							}
 							//nonblock connect success
 							fd_info->connected = 1;
 							events[i].events = EPOLLIN;
@@ -268,6 +318,9 @@ void epoll_transfer(transfer_config_t *conf, int sockfd)
 							events[i].events = EPOLLIN | EPOLLOUT;
 						}
 						if (fd_info->closed) {
+							if (debug >= 1) {
+								printf("EP:close mock con%d\n", fd_info->stat_num_packet);
+							}
 							clean_fd(fd_info, epfd, fd_map, ipport_map);
 						} else {
 							//MAYBE set only when there is remain data
@@ -310,8 +363,9 @@ void init_config(transfer_config_t *pcon, int argc, char **argv)
 	u_int16_t data_server_port = 0;
 	char* monitor_server_ip = "127.0.0.1";
 	u_int16_t monitor_server_port = 0;
+	int debug = 0;
 	char ch = '\0';
-	while ((ch = getopt(argc, argv, "s:p:t:q:h"))!= -1) {
+	while ((ch = getopt(argc, argv, "s:p:t:q:d:h"))!= -1) {
 		switch(ch) {
 			case 's': 
 				data_server_ip = optarg;
@@ -325,6 +379,9 @@ void init_config(transfer_config_t *pcon, int argc, char **argv)
 			case 'q': 
 				monitor_server_port = (u_int16_t)(atoi(optarg));
 				break;
+			case 'd': 
+				debug = atoi(optarg);
+				break;
 			case 'h': 
 				print_help();
 				exit(0);
@@ -336,6 +393,7 @@ void init_config(transfer_config_t *pcon, int argc, char **argv)
 	pcon->transfer_addr.sin_family = AF_INET;
 	pcon->transfer_addr.sin_port = htons(data_server_port);
 	inet_pton(AF_INET, data_server_ip, &pcon->transfer_addr.sin_addr);
+	pcon->debug = debug;
 }
 
 int main(int argc, char **argv) 

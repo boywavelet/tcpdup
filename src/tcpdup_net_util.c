@@ -58,6 +58,38 @@ void* fd_info_emplace_data(
 	return fp;
 }
 
+void* fd_info_append_fin(fd_info_t *pfi)
+{
+	fd_packet_t *last_pack = (fd_packet_t *)slist_peek_last(pfi->data_list);
+	unsigned int tcp_seq = pfi->tcp_seq + 1;
+	if (last_pack != NULL && last_pack->is_fin) {
+		//already there
+		return last_pack;
+	}
+	if (last_pack != NULL) {
+		tcp_seq = last_pack->tcp_seq + last_pack->packet_len;
+	}
+	return fd_info_emplace_data(pfi, NULL, 0, tcp_seq, 1);
+}
+
+//BEGIN: expect_seq = fd_info->tcp_seq + 1 
+int if_packet_consecutive(void *payload, void *arg) 
+{
+	fd_packet_t *packet = (fd_packet_t *)payload;
+	int *expect_seq = (int *)arg;
+	if (packet->tcp_seq != *expect_seq) {
+		return 0;
+	}
+	*expect_seq += packet->packet_len;
+	return 1;
+}
+
+int fd_info_is_consecutive(fd_info_t *pfi)
+{
+	int expect_seq = pfi->tcp_seq + 1;
+	return slist_readonly_iter(pfi->data_list, if_packet_consecutive, &expect_seq);
+}
+
 int write_packet_data(void *payload, void *arg)
 {
 	fd_packet_t *packet = (fd_packet_t *)payload;
@@ -66,6 +98,12 @@ int write_packet_data(void *payload, void *arg)
 		return 0;
 	}
 	if (pfi->tcp_seq + 1 != packet->tcp_seq) {
+		return 0;
+	}
+	//MAYBE: packet may contain both fin|rst and data
+	if (packet->is_fin) {
+		pfi->connected = 0;
+		pfi->closed = 1;
 		return 0;
 	}
 	int write_ret = write(pfi->fd, packet->data, packet->packet_len);

@@ -26,8 +26,8 @@ void destroy_fix_hashmap(fix_hashmap_t **ppfh, int free_payload)
 			if (free_payload) {
 				free(to_free->kv);
 			}
-			free(to_free);
 			node = node->next;
+			free(to_free);
 		}
 	}
 	free((*ppfh)->buckets);
@@ -79,16 +79,24 @@ void* delnode_fix_hashmap(fix_hashmap_t *pfh, void* key)
 	if (node == NULL) {
 		return NULL;
 	}
+	hmap_node_t *to_free = NULL;
+	void *to_ret = NULL;
 	if (pfh->equal(node->kv, key)) {
 		pfh->buckets[bucket_index] = node->next;
-		return node->kv;
+		to_free = node;
+		to_ret = node->kv;
+		free(to_free);
+		return to_ret;
 	}
 
 	while (node->next != NULL) {
 		if (pfh->equal(node->next->kv, key)) {
 			hmap_node_t *res = node->next;
+			to_ret = res->kv;
+			to_free = res;
 			node->next = node->next->next;
-			return res->kv;
+			free(to_free);
+			return to_ret;
 		}
 		node = node->next;
 	}
@@ -157,6 +165,18 @@ void* slist_peek_first(sorted_list_t *sl)
 	return sl->head->payload;
 }
 
+void* slist_peek_last(sorted_list_t *sl) 
+{
+	if (sl->head == NULL) {
+		return NULL;
+	}
+	slist_node_t *node = sl->head;
+	while (node->next != NULL) {
+		node = node->next;
+	}
+	return node->payload;
+}
+
 int is_slist_empty(sorted_list_t *sl)
 {
 	if (sl->head == NULL) {
@@ -179,5 +199,20 @@ void slist_oneshot_iter(sorted_list_t *sl, slist_iter_func si_func, void *arg)
 		}
 	}
 	sl->head = node;
+}
+
+int slist_readonly_iter(sorted_list_t *sl, slist_iter_func si_func, void *arg)
+{
+	int ret = 0;
+	slist_node_t *node = sl->head;
+	while (node != NULL) {
+		ret = si_func(node->payload, arg);
+		if (ret) {
+			node = node->next;
+		} else {
+			break;
+		}
+	}
+	return ret;
 }
 

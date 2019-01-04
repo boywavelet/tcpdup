@@ -63,8 +63,10 @@ void* slist_pop_first(sorted_list_t *sl);
 
 //return payload *
 void* slist_peek_first(sorted_list_t *sl); 
+void* slist_peek_last(sorted_list_t *sl); 
 
 int is_slist_empty(sorted_list_t *sl);
 
 void slist_oneshot_iter(sorted_list_t *sl, slist_iter_func si_func, void *arg);
+int slist_readonly_iter(sorted_list_t *sl, slist_iter_func si_func, void *arg);
 

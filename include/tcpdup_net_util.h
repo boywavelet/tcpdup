@@ -34,6 +34,10 @@ void* fd_info_emplace_data(
         fd_info_t *pfi, 
         void* data, int len, 
         unsigned int tcp_seq, int is_fin); 
+//return fd_packet_t*
+void* fd_info_append_fin(fd_info_t *pfi);
+
+int fd_info_is_consecutive(fd_info_t *pfi);
 
 void fd_info_write_data(fd_info_t *pfi);
 
