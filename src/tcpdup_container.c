@@ -216,3 +216,59 @@ int slist_readonly_iter(sorted_list_t *sl, slist_iter_func si_func, void *arg)
 	return ret;
 }
 
+void init_linked_list(linked_list_t *list) 
+{
+	list->next = list;
+	list->prev = list;
+}
+
+void __linked_list_add(
+		linked_list_t *to_add, 
+		linked_list_t *prev, linked_list_t *next)
+{
+	prev->next = to_add;
+	to_add->next = next;
+	next->prev = to_add;
+	to_add->prev = prev;
+}
+
+void linked_list_add(linked_list_t *head, linked_list_t *to_add)
+{
+	__linked_list_add(to_add, head, head->next);
+}
+
+void linked_list_add_tail(linked_list_t *head, linked_list_t *to_add)
+{
+	__linked_list_add(to_add, head->prev, head);
+}
+
+void __linked_list_del(linked_list_t *prev, linked_list_t *next)
+{
+	prev->next = next;
+	next->prev = prev;
+}
+
+void __linked_list_del_entry(linked_list_t *to_del)
+{
+	__linked_list_del(to_del->prev, to_del->next);
+}
+
+void linked_list_del(linked_list_t *to_del)
+{
+	__linked_list_del_entry(to_del);
+	init_linked_list(to_del);
+}
+
+void linked_list_move(linked_list_t *to_move, linked_list_t *new_head)
+{
+	__linked_list_del_entry(to_move);
+	linked_list_add(new_head, to_move);
+}
+
+void linked_list_move_tail(linked_list_t *to_move, linked_list_t *new_head)
+{
+	__linked_list_del_entry(to_move);
+	linked_list_add_tail(new_head, to_move);
+}
+
+

@@ -1,5 +1,7 @@
 #pragma once
 
+#include <stddef.h>
+
 ///////////////////////////////////////////////////////////////////////
 //for fix_hashmap_t
 ///////////////////////////////////////////////////////////////////////
@@ -69,4 +71,35 @@ int is_slist_empty(sorted_list_t *sl);
 
 void slist_oneshot_iter(sorted_list_t *sl, slist_iter_func si_func, void *arg);
 int slist_readonly_iter(sorted_list_t *sl, slist_iter_func si_func, void *arg);
+
+///////////////////////////////////////////////////////////////////////
+//for linked_list_t
+///////////////////////////////////////////////////////////////////////
+
+typedef struct linked_list {
+    struct linked_list *prev, *next;
+} linked_list_t;
+
+void init_linked_list(linked_list_t *list); 
+void linked_list_add(linked_list_t *head, linked_list_t *to_add);
+void linked_list_add_tail(linked_list_t *head, linked_list_t *to_add);
+void linked_list_del(linked_list_t *to_del);
+void linked_list_move(linked_list_t *to_move, linked_list_t *new_head);
+void linked_list_move_tail(linked_list_t *to_move, linked_list_t *new_head);
+
+#define linked_list_for_each(pos, head) \
+    for (pos = (head)->next; pos != (head); pos = pos->next) 
+
+#define linked_list_for_each_safe(pos, n, head) \
+    for (pos = (head)->next, n = pos->next; pos != (head); \
+            pos = n, n = pos->next) 
+
+#define wrapper_of(ptr, type, member) ({ \
+        const typeof( ((type *)0)->member) *__mptr = (ptr); \
+        (type *)( (char *)__mptr - offsetof(type, member)); })
+
+#define linked_list_entry(ptr, type, member) \
+    wrapper_of(ptr, type, member)
+
+
 

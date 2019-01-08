@@ -8,6 +8,7 @@
 #include "tcpdup_container.h"
 #include "tcpdup_ringbuffer.h"
 #include "tcpdup_net_util.h"
+#include "tcpdup_util.h"
 
 /////////////////////////////////////////////////////////////////////
 //TEST CASES FOR SLIST
@@ -162,6 +163,94 @@ int test_ringbuffer()
 }
 
 /////////////////////////////////////////////////////////////////////
+//TEST CASES FOR linked_list_t 
+/////////////////////////////////////////////////////////////////////
+
+typedef struct list_elem_wrap {
+	int value;
+	linked_list_t list;
+} list_elem_wrap_t;
+
+int test_linked_list()
+{
+	linked_list_t lh;
+	init_linked_list(&lh);
+	list_elem_wrap_t ews[8] = {
+		{1, {NULL, NULL}}, 
+		{2, {NULL, NULL}}, 
+		{3, {NULL, NULL}}, 
+		{4, {NULL, NULL}}, 
+		{5, {NULL, NULL}}, 
+		{6, {NULL, NULL}}, 
+		{7, {NULL, NULL}}, 
+		{8, {NULL, NULL}} 
+	};
+	int i = 0;
+	for (i = 0; i < 8; ++i) {
+		init_linked_list(&ews[i].list);
+	}
+
+	for (i = 0; i < 4; ++i) {
+		linked_list_add(&lh, &ews[i].list);
+	}
+	//now, head,4,3,2,1
+
+	int value = 4;
+	linked_list_t *pos;
+	linked_list_t *iter_pos;
+	list_elem_wrap_t *entry;
+	linked_list_for_each(pos, &lh) {
+		entry = linked_list_entry(pos, list_elem_wrap_t, list);
+		assert(value == entry->value);
+		value--;
+	}
+
+	for (i = 4; i < 8; ++i) {
+		linked_list_add_tail(&lh, &ews[i].list);
+	}
+	//now, head,4,3,2,1,5,6,7,8
+	linked_list_move(&ews[2].list, &lh);
+	linked_list_move(&ews[1].list, &lh);
+	linked_list_move(&ews[0].list, &lh);
+	//now, head,1,2,3,4,5,6,7,8
+	value = 1;
+	linked_list_for_each(pos, &lh) {
+		entry = linked_list_entry(pos, list_elem_wrap_t, list);
+		assert(value == entry->value);
+		value++;
+	}
+	for (i = 0; i < 4; ++i) {
+		linked_list_del(&ews[2 * i].list);
+	}
+	//now, head,2,4,6,8
+	value = 2;
+	linked_list_for_each_safe(pos, iter_pos, &lh) {
+		entry = linked_list_entry(pos, list_elem_wrap_t, list);
+		assert(value == entry->value);
+		value += 2;
+	}
+	for (i = 0; i < 4; ++i) {
+		linked_list_add_tail(&lh, &ews[2 * i].list);
+	}
+	//now, head,2,4,6,8,1,3,5,7
+	linked_list_for_each_safe(pos, iter_pos, &lh) {
+		entry = linked_list_entry(pos, list_elem_wrap_t, list);
+		if (entry->value % 2 == 0) {
+			linked_list_del(pos);
+		}
+	}
+	//now, head1,3,5,7
+	value = 1;
+	linked_list_for_each_safe(pos, iter_pos, &lh) {
+		entry = linked_list_entry(pos, list_elem_wrap_t, list);
+		assert(value == entry->value);
+		value += 2;
+	}
+
+	return 0;
+}
+
+/////////////////////////////////////////////////////////////////////
 //TEST CASES FOR fd_info_t 
 /////////////////////////////////////////////////////////////////////
 
@@ -214,6 +303,17 @@ int test_fd_info()
 }
 
 /////////////////////////////////////////////////////////////////////
+//TEST CASES FOR util 
+/////////////////////////////////////////////////////////////////////
+
+int test_util()
+{
+	long current_milli = get_current_milliseconds();
+	assert(current_milli > 0);
+	return 0;
+}
+
+/////////////////////////////////////////////////////////////////////
 //BASE 
 /////////////////////////////////////////////////////////////////////
 
@@ -237,7 +337,9 @@ int main(int argc, char **argv)
 	test_one(test_slist, "sorted_list");
 	test_one(test_fix_hashmap, "fix_hashmap");
 	test_one(test_ringbuffer, "ring buffer");
+	test_one(test_linked_list, "linked list");
 	test_one(test_fd_info, "fd info");
+	test_one(test_util, "util");
 	printf("*****************************************\n");
 	printf("TEST CASES TOTAL:%d, PASSED:%d, FAILED:%d\n", 
 			all, pass, (all - pass));

@@ -4,6 +4,7 @@
 #include <stdlib.h>
 #include <unistd.h>
 #include <errno.h>
+#include "tcpdup_util.h"
 
 void set_fd_nonblock(int fd) 
 {
@@ -31,11 +32,14 @@ void init_fd_info(
 	(*ppfi)->stat_total_write = 0;
 	(*ppfi)->stat_num_packet = 0;
 	(*ppfi)->tcp_seq= tcp_seq;
+	(*ppfi)->last_active_time = get_current_milliseconds();
+	init_linked_list(&(*ppfi)->time_list);
 	init_slist(&(*ppfi)->data_list, fd_packet_cmp);
 }
 
 void destroy_fd_info(fd_info_t **ppfi)
 {
+	linked_list_del(&(*ppfi)->time_list);
 	destroy_slist(&(*ppfi)->data_list, 1);
 	free(*ppfi);
 }
@@ -149,5 +153,14 @@ int is_fd_info_has_writable_data(fd_info_t *pfi)
 	} else {
 		return 0;
 	}
+}
+
+void fd_info_touch(
+		fd_info_t *pfi, 
+		long current_time, 
+		linked_list_t *time_list_head)
+{
+	pfi->last_active_time = current_time;
+	linked_list_move_tail(&pfi->time_list, time_list_head);
 }
 

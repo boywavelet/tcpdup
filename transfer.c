@@ -22,10 +22,15 @@ typedef struct transfer_config {
 	struct in_addr ori_dst;
 	u_int16_t ori_dst_port;
 	struct sockaddr_in transfer_addr;
+	int ewait_time;
 	int debug;
 } transfer_config_t;
 
-void clean_fd(
+//TODO two working modes
+//1. After Sending All Request-Data, Close
+//2. Close in-active(e.g. 1000ms no read) Sockets in each epoll-iteration,
+
+void force_clean_fd(
 		fd_info_t *fd_info,
 		int epfd,
 		fix_hashmap_t *fd_map,
@@ -42,11 +47,21 @@ void clean_fd(
 	close(fd);
 }
 
+void clean_fd(
+		fd_info_t *fd_info,
+		int epfd,
+		fix_hashmap_t *fd_map,
+		fix_hashmap_t *ipport_map)
+{
+	force_clean_fd(fd_info, epfd, fd_map, ipport_map);
+}
+
 void process_packet(
 		transfer_config_t *conf, 
 		int epfd,
 		struct pcap_pkthdr *pkthdr, 
 		char* packet, 
+		linked_list_t *time_list_head,
 		fix_hashmap_t *fd_map,
 		fix_hashmap_t *ipport_map)
 {
@@ -80,6 +95,7 @@ void process_packet(
 					event.data.fd = fd;
 					epoll_ctl(epfd, EPOLL_CTL_ADD, fd, &event);
 					init_fd_info(&fd_info, fd, ipport, connected, ntohl(tcphdr->seq));
+					linked_list_add_tail(time_list_head, &fd_info->time_list);
 					insert_fix_hashmap(fd_map, &fd_info->fd, fd_info); 
 					insert_fix_hashmap(ipport_map, &fd_info->ipport, fd_info); 
 				} else {
@@ -92,6 +108,7 @@ void process_packet(
 				event.data.fd = fd;
 				epoll_ctl(epfd, EPOLL_CTL_ADD, fd, &event);
 				init_fd_info(&fd_info, fd, ipport, connected, ntohl(tcphdr->seq));
+				linked_list_add_tail(time_list_head, &fd_info->time_list);
 				insert_fix_hashmap(fd_map, &fd, fd_info); 
 				insert_fix_hashmap(ipport_map, ipport, fd_info); 
 			}
@@ -99,19 +116,26 @@ void process_packet(
 				printf("Syn. Open new Connection\n");
 			}
 		} else if (fd_info && (tcphdr->fin || tcphdr->rst)) { 
-			//MAYBE: packet may contain both fin|rst and data
+			//packet may contain both fin|rst and data
+			if (payload_len > 0) {
+				char *payload = packet + SIZE_ETHERHDR + size_iphdr + size_tcphdr;
+				fd_info_emplace_data(fd_info, payload, payload_len, ntohl(tcphdr->seq), 0);
+			}
+
 			//second-last chance to write data
-			char *payload = packet + SIZE_ETHERHDR + size_iphdr + size_tcphdr;
-			fd_info_emplace_data(fd_info, payload, payload_len, ntohl(tcphdr->seq), 1);
 			fd_info_write_data(fd_info);
 			//check whether we have full-data 
 			if (!fd_info_is_consecutive(fd_info)) {
+				if (debug >= 0 
+						&& (fd_info->stat_num_packet > 0
+						|| fd_info->stat_total_write == 0)) {
+					printf("Fin|Rst. Close Connection, %d, %d\n", 
+							fd_info->stat_num_packet, fd_info->stat_total_write);
+				}
 				//free fd_info, epoll remove
 				clean_fd(fd_info, epfd, fd_map, ipport_map);
-				if (debug > 0) {
-					printf("Fin|Rst. Close Connection, %d\n", fd_info->stat_num_packet);
-				}
 			} else {
+				fd_info_append_fin(fd_info);
 				//close operation is postponed to write
 				if (debug > 0) {
 					printf("Fin|Rst. Defer Close, %d\n", fd_info->stat_num_packet);
@@ -153,7 +177,7 @@ void process_packet(
 			fd_info_write_data(fd_info);
 			if (!fd_info_is_consecutive(fd_info)) {
 				clean_fd(fd_info, epfd, fd_map, ipport_map);
-				if (debug > 0) {
+				if (debug >= 0) {
 					printf("Server Fin|Rst, close connection\n");
 				}
 			} else {
@@ -174,6 +198,7 @@ void process_new_data(
 		transfer_config_t *conf, 
 		int epfd,
 		ring_buffer_t *buffer, 
+		linked_list_t *time_list_head,
 		fix_hashmap_t *fd_map,
 		fix_hashmap_t *ipport_map)
 {
@@ -190,7 +215,8 @@ void process_new_data(
 			if (get_ringbuffer_avail_read_size(buffer) >= pack_len) {
 				ringbuffer_read(buffer, buf, pack_len);
 				//process head + data
-				process_packet(conf, epfd, &pkthdr, buf, fd_map, ipport_map);
+				process_packet(conf, epfd, &pkthdr, buf, time_list_head, 
+						fd_map, ipport_map);
 			} else {
 				ringbuffer_unread(buffer, pkthdr_size);
 				break;
@@ -230,6 +256,26 @@ int ipport_equal(void *keyvalue, void *key)
 	return memcmp(pfd, pkv->ipport, 6) == 0; 
 }
 
+void process_time_events(
+		int epfd,
+		int expire_time,
+		long current_milli,
+		linked_list_t *time_list_head,
+		fix_hashmap_t *fd_map,
+		fix_hashmap_t *ipport_map)
+{
+	linked_list_t *pos, *iter_pos;
+	fd_info_t *entry;
+	linked_list_for_each_safe(pos, iter_pos, time_list_head) {
+		entry = linked_list_entry(pos, fd_info_t, time_list);
+		if (current_milli - entry->last_active_time > expire_time) {
+			force_clean_fd(entry, epfd, fd_map, ipport_map);
+		} else {
+			break;
+		}
+	}
+}
+
 void epoll_transfer(transfer_config_t *conf, int sockfd) 
 {
 	int debug = conf->debug;
@@ -241,6 +287,8 @@ void epoll_transfer(transfer_config_t *conf, int sockfd)
 	ring_buffer_t* buffer = NULL;
 	init_ringbuffer(&buffer, getpagesize());
 
+	linked_list_t time_list_head;
+	init_linked_list(&time_list_head);
 	fix_hashmap_t *fd_map = NULL;
 	init_fix_hashmap(&fd_map, max_con_size, fd_hash, fd_equal); 
 	//both ip && port are network byte order
@@ -260,8 +308,12 @@ void epoll_transfer(transfer_config_t *conf, int sockfd)
 	
 	//read from sockfd and write data to buffer
 	char *buf = malloc(2048);
-	//always true
-	while ((num_events = epoll_wait(epfd, events, max_con_size, -1)) > 0) {
+	int ewait_time = conf->ewait_time; 
+	int expire_time = ewait_time;
+	long current_milli = 0;
+	while (1) {
+		num_events = epoll_wait(epfd, events, max_con_size, ewait_time);
+		current_milli = get_current_milliseconds();
 		int i = 0;
 		for (; i < num_events; ++i) {
 			int fd = events[i].data.fd;
@@ -269,20 +321,21 @@ void epoll_transfer(transfer_config_t *conf, int sockfd)
 				if (events[i].events & (EPOLLERR | EPOLLHUP | EPOLLRDHUP)) {
 					close(fd);
 					epoll_ctl(epfd, EPOLL_CTL_DEL, fd, &events[i]);
-					break;
+					goto transfer_end;
 				} else if (events[i].events & EPOLLIN) {
 					//maybe read until drain
 					int len = read(fd, buf, 2000);
 					if (len == 0) {
 						close(fd);
 						epoll_ctl(epfd, EPOLL_CTL_DEL, fd, &events[i]);
-						break;
+						goto transfer_end;
 					}
 					if (debug >= 2) {
 						printf("Read data len:%d\n", len);
 					}
 					ringbuffer_write(buffer, buf, len);
-					process_new_data(conf, epfd, buffer, fd_map, ipport_map);
+					process_new_data(conf, epfd, buffer, 
+							&time_list_head, fd_map, ipport_map);
 				}
 			} else {
 				fd_info_t *fd_info = lookup_fix_hashmap(fd_map, &fd);
@@ -302,6 +355,8 @@ void epoll_transfer(transfer_config_t *conf, int sockfd)
 						if (len == 0) {
 							clean_fd(fd_info, epfd, fd_map, ipport_map);
 						}
+						//update last active time
+						fd_info_touch(fd_info, current_milli, &time_list_head);
 					}
 					if (events[i].events & EPOLLOUT) {
 						//1. check if connected: add EPOLLIN  2. write remain data
@@ -331,11 +386,15 @@ void epoll_transfer(transfer_config_t *conf, int sockfd)
 				}
 			}
 		}
+
+		//TODO check work mode
+		process_time_events(epfd, expire_time, current_milli, &time_list_head, fd_map, ipport_map);
 	}
 
 	//MAYBE need to process remain fd's operations
 	//e.g. write all pending data
 	
+transfer_end:
 	free(buf);
 	free(events);
 	destroy_fix_hashmap(&ipport_map, 0);
@@ -353,6 +412,8 @@ void print_help()
 	printf("    -q <port>  monitored server port\n");
 	printf("    -s <ip>    transfer server ip\n");
 	printf("    -p <port>  transfer server port\n");
+	printf("    -e <time>  [OPTIONAL:1000] epoll wait time\n");
+	printf("    -d <flag>  [OPTIONAL:0] debug\n");
 	printf("    -h         Show This\n");
 }
 
@@ -363,9 +424,10 @@ void init_config(transfer_config_t *pcon, int argc, char **argv)
 	u_int16_t data_server_port = 0;
 	char* monitor_server_ip = "127.0.0.1";
 	u_int16_t monitor_server_port = 0;
+	int ewait_time = 1000; //ms
 	int debug = 0;
 	char ch = '\0';
-	while ((ch = getopt(argc, argv, "s:p:t:q:d:h"))!= -1) {
+	while ((ch = getopt(argc, argv, "s:p:t:q:e:d:h"))!= -1) {
 		switch(ch) {
 			case 's': 
 				data_server_ip = optarg;
@@ -378,6 +440,9 @@ void init_config(transfer_config_t *pcon, int argc, char **argv)
 				break;
 			case 'q': 
 				monitor_server_port = (u_int16_t)(atoi(optarg));
+				break;
+			case '3': 
+				ewait_time = atoi(optarg);
 				break;
 			case 'd': 
 				debug = atoi(optarg);
@@ -393,6 +458,7 @@ void init_config(transfer_config_t *pcon, int argc, char **argv)
 	pcon->transfer_addr.sin_family = AF_INET;
 	pcon->transfer_addr.sin_port = htons(data_server_port);
 	inet_pton(AF_INET, data_server_ip, &pcon->transfer_addr.sin_addr);
+	pcon->ewait_time = ewait_time;
 	pcon->debug = debug;
 }
 

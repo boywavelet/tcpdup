@@ -143,10 +143,8 @@ void* retransfer(void *arg)
 		int payload_len = size_ip - size_iphdr - size_tcphdr;
 		if (debug >= 2) {
 			printf ("Received Size: %d, ", pkthdr.len);
-			printf ("SRC IP: %s:, ", inet_ntoa(iphdr->ip_src));
-			printf ("SRC PORT: %d:, ", ntohs(tcphdr->th_sport));
-			printf ("DST IP: %s:, ", inet_ntoa(iphdr->ip_dst));
-			printf ("DST PORT: %d:, ", ntohs(tcphdr->th_dport));
+			printf ("%s:%d > ", inet_ntoa(iphdr->ip_src), ntohs(tcphdr->th_sport));
+			printf ("%s:%d , ", inet_ntoa(iphdr->ip_dst), ntohs(tcphdr->th_dport));
 			printf ("PAYLOADLEN: %d:, ", payload_len);
 			printf ("SEQ: %u; ACK:%u, ", ntohl(tcphdr->seq), ntohl(tcphdr->ack_seq));
 			printf ("FLAG syn: %d, fin:%d, rst:%d, ack:%d\n", 

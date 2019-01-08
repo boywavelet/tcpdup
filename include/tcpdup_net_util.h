@@ -19,6 +19,8 @@ typedef struct fd_info {
     int stat_total_write;
     int stat_num_packet;
     unsigned int tcp_seq;
+    long last_active_time;
+    linked_list_t time_list;
     sorted_list_t *data_list;
 } fd_info_t;
 
@@ -42,4 +44,9 @@ int fd_info_is_consecutive(fd_info_t *pfi);
 void fd_info_write_data(fd_info_t *pfi);
 
 int is_fd_info_has_writable_data(fd_info_t *pfi);
+
+void fd_info_touch(
+		fd_info_t *pfi, 
+		long current_time, 
+		linked_list_t *time_list_head);
 
