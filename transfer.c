@@ -18,15 +18,20 @@
 #include "tcpdup_ringbuffer.h"
 #include "tcpdup_container.h"
 
+#define CLOSE_ON_FIN 1
+#define CLOSE_ON_TIMEOUT 2
+
 typedef struct transfer_config {
 	struct in_addr ori_dst;
 	u_int16_t ori_dst_port;
 	struct sockaddr_in transfer_addr;
+	u_int16_t listen_port;
 	int ewait_time;
+	int work_mode;
 	int debug;
 } transfer_config_t;
 
-//TODO two working modes
+//two working modes
 //1. After Sending All Request-Data, Close
 //2. Close in-active(e.g. 1000ms no read) Sockets in each epoll-iteration,
 
@@ -47,13 +52,58 @@ void force_clean_fd(
 	close(fd);
 }
 
-void clean_fd(
+void clean_timeout_fd(
+		transfer_config_t *conf, 
 		fd_info_t *fd_info,
 		int epfd,
 		fix_hashmap_t *fd_map,
 		fix_hashmap_t *ipport_map)
 {
-	force_clean_fd(fd_info, epfd, fd_map, ipport_map);
+	int mode = conf->work_mode;
+	if (mode & CLOSE_ON_TIMEOUT) {
+		force_clean_fd(fd_info, epfd, fd_map, ipport_map);
+	}
+}
+
+void clean_fd(
+		transfer_config_t *conf, 
+		fd_info_t *fd_info,
+		int epfd,
+		fix_hashmap_t *fd_map,
+		fix_hashmap_t *ipport_map)
+{
+	int mode = conf->work_mode;
+	if (mode & CLOSE_ON_FIN) {
+		force_clean_fd(fd_info, epfd, fd_map, ipport_map);
+	}
+}
+
+void process_fin_packet(
+		fd_info_t *fd_info, 
+		int epfd,
+		fix_hashmap_t *fd_map,
+		fix_hashmap_t *ipport_map,
+		int debug)
+{
+	//second-last chance to write data
+	fd_info_write_data(fd_info);
+	//check whether we have full-data 
+	if (!fd_info_is_consecutive(fd_info)) {
+		if (debug >= 0 
+				&& (fd_info->stat_num_packet > 0
+					|| fd_info->stat_total_write == 0)) {
+			printf("Fin|Rst. Close Connection, %d, %d\n", 
+					fd_info->stat_num_packet, fd_info->stat_total_write);
+		}
+		//free fd_info, epoll remove
+		force_clean_fd(fd_info, epfd, fd_map, ipport_map);
+	} else {
+		fd_info_append_fin(fd_info);
+		//close operation is postponed to write
+		if (debug > 0) {
+			printf("Fin|Rst. Defer Close, %d\n", fd_info->stat_num_packet);
+		}
+	}
 }
 
 void process_packet(
@@ -65,6 +115,7 @@ void process_packet(
 		fix_hashmap_t *fd_map,
 		fix_hashmap_t *ipport_map)
 {
+	int mode = conf->work_mode;
 	int debug = conf->debug;
 	char ipport[6];
 	struct epoll_event event;
@@ -82,64 +133,36 @@ void process_packet(
 		memcpy(ipport + 4, &tcphdr->source, 2);
 		fd_info_t *fd_info = lookup_fix_hashmap(ipport_map, ipport);
 		if (fd_info == NULL && tcphdr->syn) {
+			//MAYBE:packet may contain both syn and data
 			//create fd_info, record the start seq, create fd, put it to epoll
 			int fd = socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK, 0); 
 			int ret = connect(fd, 
 					(const struct sockaddr *)&conf->transfer_addr, 
 					sizeof(struct sockaddr_in));
 			int connected = 1;
-			if (ret != 0) {
-				connected = 0;
-				if (errno == EINPROGRESS) {
-					event.events = EPOLLOUT;
-					event.data.fd = fd;
-					epoll_ctl(epfd, EPOLL_CTL_ADD, fd, &event);
-					init_fd_info(&fd_info, fd, ipport, connected, ntohl(tcphdr->seq));
-					linked_list_add_tail(time_list_head, &fd_info->time_list);
-					insert_fix_hashmap(fd_map, &fd_info->fd, fd_info); 
-					insert_fix_hashmap(ipport_map, &fd_info->ipport, fd_info); 
-				} else {
-					close(fd);
-				}
+			if (ret != 0 && errno != EINPROGRESS) {
+				close(fd);
 			} else {
-				//nonblock connect complete immediately, rare
-				//no data to write at first
-				event.events = EPOLLIN;
+				if (ret == 0) {
+					event.events = EPOLLIN;
+				} else {
+					connected = 0;
+					event.events = EPOLLOUT;
+				}
 				event.data.fd = fd;
 				epoll_ctl(epfd, EPOLL_CTL_ADD, fd, &event);
 				init_fd_info(&fd_info, fd, ipport, connected, ntohl(tcphdr->seq));
 				linked_list_add_tail(time_list_head, &fd_info->time_list);
-				insert_fix_hashmap(fd_map, &fd, fd_info); 
-				insert_fix_hashmap(ipport_map, ipport, fd_info); 
+				insert_fix_hashmap(fd_map, &fd_info->fd, fd_info); 
+				insert_fix_hashmap(ipport_map, &fd_info->ipport, fd_info); 
 			}
 			if (debug > 0) {
 				printf("Syn. Open new Connection\n");
 			}
 		} else if (fd_info && (tcphdr->fin || tcphdr->rst)) { 
-			//packet may contain both fin|rst and data
-			if (payload_len > 0) {
-				char *payload = packet + SIZE_ETHERHDR + size_iphdr + size_tcphdr;
-				fd_info_emplace_data(fd_info, payload, payload_len, ntohl(tcphdr->seq), 0);
-			}
-
-			//second-last chance to write data
-			fd_info_write_data(fd_info);
-			//check whether we have full-data 
-			if (!fd_info_is_consecutive(fd_info)) {
-				if (debug >= 0 
-						&& (fd_info->stat_num_packet > 0
-						|| fd_info->stat_total_write == 0)) {
-					printf("Fin|Rst. Close Connection, %d, %d\n", 
-							fd_info->stat_num_packet, fd_info->stat_total_write);
-				}
-				//free fd_info, epoll remove
-				clean_fd(fd_info, epfd, fd_map, ipport_map);
-			} else {
-				fd_info_append_fin(fd_info);
-				//close operation is postponed to write
-				if (debug > 0) {
-					printf("Fin|Rst. Defer Close, %d\n", fd_info->stat_num_packet);
-				}
+			//MAYBE:packet may contain both fin|rst and data
+			if (mode & CLOSE_ON_FIN) {
+				process_fin_packet(fd_info, epfd, fd_map, ipport_map, debug);
 			}
 		} else if (fd_info && payload_len > 0) {
 			//emplace request data, try to write
@@ -153,44 +176,26 @@ void process_packet(
 				epoll_ctl(epfd, EPOLL_CTL_MOD, fd_info->fd, &event);
 			}
 			if (fd_info->closed) {
-				clean_fd(fd_info, epfd, fd_map, ipport_map);
-			}
-			if (debug > 0) {
-				printf("Client Data. transfer\n");
+				clean_fd(conf, fd_info, epfd, fd_map, ipport_map);
 			}
 		} else {
 			//1. data_len = 0, probably pure ack, nothing to do 
 			//2. fd_info == NULL && !tcphdr->syn, bypass mid-data
 			//3. fd_info != NULL && tcphdr->syn, weird, ignore
 			//DO NOTHING 
-			if (debug > 0) {
-				printf("ack|old-con-data. bypass\n");
-			}
 		}
 	} else {
 		//server-response data, process fin && rst
-		memcpy(ipport, &iphdr->ip_dst, 4);
-		memcpy(ipport + 4, &tcphdr->dest, 2);
-		fd_info_t *fd_info = lookup_fix_hashmap(ipport_map, ipport);
-		if (fd_info != NULL && (tcphdr->fin || tcphdr->rst)) {
-			//try to write-out the remaining data first
-			fd_info_write_data(fd_info);
-			if (!fd_info_is_consecutive(fd_info)) {
-				clean_fd(fd_info, epfd, fd_map, ipport_map);
-				if (debug >= 0) {
-					printf("Server Fin|Rst, close connection\n");
-				}
-			} else {
-				fd_info_append_fin(fd_info);
-				if (debug > 0) {
-					printf("Server Fin|Rst, defer close\n");
-				}
-			}
-		} else {
-			if (debug > 0) {
-				printf("Server Resp, bypass\n");
-			}
+		if (mode & CLOSE_ON_FIN) {
+			memcpy(ipport, &iphdr->ip_dst, 4);
+			memcpy(ipport + 4, &tcphdr->dest, 2);
+			fd_info_t *fd_info = lookup_fix_hashmap(ipport_map, ipport);
+			if (fd_info != NULL && (tcphdr->fin || tcphdr->rst)) {
+				//try to write-out the remaining data first
+				process_fin_packet(fd_info, epfd, fd_map, ipport_map, debug);
+			} 
 		}
+
 	}
 }
 
@@ -257,6 +262,7 @@ int ipport_equal(void *keyvalue, void *key)
 }
 
 void process_time_events(
+		transfer_config_t *conf, 
 		int epfd,
 		int expire_time,
 		long current_milli,
@@ -269,7 +275,7 @@ void process_time_events(
 	linked_list_for_each_safe(pos, iter_pos, time_list_head) {
 		entry = linked_list_entry(pos, fd_info_t, time_list);
 		if (current_milli - entry->last_active_time > expire_time) {
-			force_clean_fd(entry, epfd, fd_map, ipport_map);
+			clean_timeout_fd(conf, entry, epfd, fd_map, ipport_map);
 		} else {
 			break;
 		}
@@ -345,7 +351,7 @@ void epoll_transfer(transfer_config_t *conf, int sockfd)
 					continue;
 				}
 				if (events[i].events & (EPOLLERR | EPOLLHUP | EPOLLRDHUP)) {
-					clean_fd(fd_info, epfd, fd_map, ipport_map);
+					force_clean_fd(fd_info, epfd, fd_map, ipport_map);
 				} else { 
 					if (events[i].events & EPOLLIN) {
 						//read & discard, read until drain
@@ -353,7 +359,7 @@ void epoll_transfer(transfer_config_t *conf, int sockfd)
 						while ((len = read(fd, buf, 2000)) == 2000);
 						//if read 0, close
 						if (len == 0) {
-							clean_fd(fd_info, epfd, fd_map, ipport_map);
+							force_clean_fd(fd_info, epfd, fd_map, ipport_map);
 						}
 						//update last active time
 						fd_info_touch(fd_info, current_milli, &time_list_head);
@@ -362,37 +368,39 @@ void epoll_transfer(transfer_config_t *conf, int sockfd)
 						//1. check if connected: add EPOLLIN  2. write remain data
 						if (!fd_info->connected) {
 							if (debug >= 1) {
-								printf("Connection success%d\n", fd_info->stat_num_packet);
+								printf("Connection success%d\n", 
+										fd_info->stat_num_packet);
 							}
 							//nonblock connect success
 							fd_info->connected = 1;
-							events[i].events = EPOLLIN;
+							fd_info_touch(fd_info, current_milli, &time_list_head);
 						}
+						int wt_before = fd_info->stat_total_write;
 						fd_info_write_data(fd_info);
-						if (is_fd_info_has_writable_data(fd_info)) {
-							events[i].events = EPOLLIN | EPOLLOUT;
+						int wt_after = fd_info->stat_total_write;
+						if (wt_after > wt_before) {
+							fd_info_touch(fd_info, current_milli, &time_list_head);
 						}
+						if (!is_fd_info_has_writable_data(fd_info)) {
+							events[i].events = EPOLLIN;
+							epoll_ctl(epfd, EPOLL_CTL_MOD, fd, &events[i]);
+						} 
 						if (fd_info->closed) {
 							if (debug >= 1) {
-								printf("EP:close mock con%d\n", fd_info->stat_num_packet);
+								printf("EP:close mock con%d\n", 
+										fd_info->stat_num_packet);
 							}
-							clean_fd(fd_info, epfd, fd_map, ipport_map);
-						} else {
-							//MAYBE set only when there is remain data
-							//EPOLLIN is always ON for connected socket
-							epoll_ctl(epfd, EPOLL_CTL_MOD, fd, &events[i]);
-						}
+							clean_fd(conf, fd_info, epfd, fd_map, ipport_map);
+						} 
 					}
 				}
 			}
 		}
 
-		//TODO check work mode
-		process_time_events(epfd, expire_time, current_milli, &time_list_head, fd_map, ipport_map);
+		process_time_events(conf, epfd, 
+				expire_time, current_milli, 
+				&time_list_head, fd_map, ipport_map);
 	}
-
-	//MAYBE need to process remain fd's operations
-	//e.g. write all pending data
 	
 transfer_end:
 	free(buf);
@@ -412,7 +420,9 @@ void print_help()
 	printf("    -q <port>  monitored server port\n");
 	printf("    -s <ip>    transfer server ip\n");
 	printf("    -p <port>  transfer server port\n");
+	printf("    -l <port>  [OPTIONAL:23456] listen port\n");
 	printf("    -e <time>  [OPTIONAL:1000] epoll wait time\n");
+	printf("    -m <mode>  [OPTIONAL:3] close mode\n");
 	printf("    -d <flag>  [OPTIONAL:0] debug\n");
 	printf("    -h         Show This\n");
 }
@@ -424,10 +434,12 @@ void init_config(transfer_config_t *pcon, int argc, char **argv)
 	u_int16_t data_server_port = 0;
 	char* monitor_server_ip = "127.0.0.1";
 	u_int16_t monitor_server_port = 0;
+	u_int16_t listen_port = 23456;
 	int ewait_time = 1000; //ms
+	int mode = CLOSE_ON_FIN | CLOSE_ON_TIMEOUT;
 	int debug = 0;
 	char ch = '\0';
-	while ((ch = getopt(argc, argv, "s:p:t:q:e:d:h"))!= -1) {
+	while ((ch = getopt(argc, argv, "s:p:t:q:l:e:m:d:h"))!= -1) {
 		switch(ch) {
 			case 's': 
 				data_server_ip = optarg;
@@ -441,8 +453,14 @@ void init_config(transfer_config_t *pcon, int argc, char **argv)
 			case 'q': 
 				monitor_server_port = (u_int16_t)(atoi(optarg));
 				break;
-			case '3': 
+			case 'l': 
+				listen_port = (u_int16_t)(atoi(optarg));
+				break;
+			case 'e': 
 				ewait_time = atoi(optarg);
+				break;
+			case 'm': 
+				mode = atoi(optarg);
 				break;
 			case 'd': 
 				debug = atoi(optarg);
@@ -458,7 +476,9 @@ void init_config(transfer_config_t *pcon, int argc, char **argv)
 	pcon->transfer_addr.sin_family = AF_INET;
 	pcon->transfer_addr.sin_port = htons(data_server_port);
 	inet_pton(AF_INET, data_server_ip, &pcon->transfer_addr.sin_addr);
+	pcon->listen_port = listen_port;
 	pcon->ewait_time = ewait_time;
+	pcon->work_mode = mode;
 	pcon->debug = debug;
 }
 
@@ -485,7 +505,7 @@ int main(int argc, char **argv)
 	bzero(&servaddr, sizeof(servaddr));
 	servaddr.sin_family = AF_INET;
 	servaddr.sin_addr.s_addr = htonl(INADDR_ANY);
-	servaddr.sin_port = htons(23456);
+	servaddr.sin_port = htons(conf.listen_port);
 
 	bind(listenfd, (const struct sockaddr *)&servaddr, sizeof(servaddr));
 	listen(listenfd, 512);

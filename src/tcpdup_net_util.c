@@ -48,6 +48,10 @@ void* fd_info_emplace_data(
 		fd_info_t *pfi, void* data, int len, 
 		unsigned int tcp_seq, int is_fin) 
 {
+	if (pfi->tcp_seq >= tcp_seq) {
+		//probably duplicate packets arrived, ignore
+		return NULL;
+	}
 	int size = sizeof(fd_packet_t) + len;
 	fd_packet_t *fp = malloc(size);
 	memset(fp, 0, size);
