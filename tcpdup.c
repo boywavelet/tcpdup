@@ -187,11 +187,11 @@ int main(int argc, char* argv[])
 	}
 	signal(SIGPIPE, SIG_IGN);
 
-	char* data_server_ip = "10.23.53.150";
-	u_int16_t data_server_port = 23456;
-	char* monitor_server_ip = "10.23.53.150";
-	u_int16_t monitor_server_port = 12345;
-	char* net_iface = "eth0";
+	char* data_server_ip = NULL;
+	u_int16_t data_server_port = 0;
+	char* monitor_server_ip = NULL;
+	u_int16_t monitor_server_port = 0;
+	char* net_iface = NULL;
 	int debug = 0;
 
 	char ch = '\0';
@@ -227,6 +227,7 @@ int main(int argc, char* argv[])
 			monitor_server_ip, monitor_server_port,
 			monitor_server_ip, monitor_server_port);
 
+	//100 MB
 	int data_buffer_size = 100 * 1024 * 1024;
 
 	int count = 0;

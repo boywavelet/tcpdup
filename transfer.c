@@ -304,7 +304,6 @@ void epoll_transfer(transfer_config_t *conf, int sockfd)
 	//set sockfd non-block, put it to epoll-loop
 	set_fd_nonblock(sockfd);
 
-	//MAYBE destroy LONG-TIME IDLE socket
 	struct epoll_event *events = malloc(sizeof(struct epoll_event) * max_con_size);
 	int num_events = 0;
 
