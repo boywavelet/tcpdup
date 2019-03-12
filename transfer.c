@@ -211,7 +211,7 @@ void process_new_data(
 	//e.g. SYN, DATA, FIN. connection may be not ready when check the data,
 	//possibly lose request
 	struct pcap_pkthdr pkthdr;
-	char *buf = malloc(2048);
+	char *buf = malloc(2 * MAXBYTES2CAPTURE);
 	while (1) {
 		int pkthdr_size = sizeof(struct pcap_pkthdr);
 		if (get_ringbuffer_avail_read_size(buffer) > pkthdr_size) {
@@ -291,7 +291,7 @@ void epoll_transfer(transfer_config_t *conf, int sockfd)
 		perror("epoll create failed");
 	}
 	ring_buffer_t* buffer = NULL;
-	init_ringbuffer(&buffer, getpagesize());
+	init_ringbuffer(&buffer, 16 * MAXBYTES2CAPTURE);
 
 	linked_list_t time_list_head;
 	init_linked_list(&time_list_head);
@@ -312,7 +312,7 @@ void epoll_transfer(transfer_config_t *conf, int sockfd)
 	epoll_ctl(epfd, EPOLL_CTL_ADD, sockfd, &events[0]);
 	
 	//read from sockfd and write data to buffer
-	char *buf = malloc(2048);
+	char *buf = malloc(MAXBYTES2CAPTURE);
 	int ewait_time = conf->ewait_time; 
 	int expire_time = ewait_time;
 	long current_milli = 0;
@@ -329,7 +329,7 @@ void epoll_transfer(transfer_config_t *conf, int sockfd)
 					goto transfer_end;
 				} else if (events[i].events & EPOLLIN) {
 					//maybe read until drain
-					int len = read(fd, buf, 2000);
+					int len = read(fd, buf, MAXBYTES2CAPTURE);
 					if (len == 0) {
 						close(fd);
 						epoll_ctl(epfd, EPOLL_CTL_DEL, fd, &events[i]);
@@ -359,9 +359,10 @@ void epoll_transfer(transfer_config_t *conf, int sockfd)
 						//if read 0, close
 						if (len == 0) {
 							force_clean_fd(fd_info, epfd, fd_map, ipport_map);
+						} else {
+							//update last active time
+							fd_info_touch(fd_info, current_milli, &time_list_head);
 						}
-						//update last active time
-						fd_info_touch(fd_info, current_milli, &time_list_head);
 					}
 					if (events[i].events & EPOLLOUT) {
 						//1. check if connected: add EPOLLIN  2. write remain data
